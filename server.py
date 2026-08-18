@@ -2,10 +2,13 @@ from flask import Flask, jsonify, render_template, request
 import math
 import os
 import sqlite3
+from jinja2 import FileSystemLoader
 
 from liam_truss import calculate_liam_truss_mechanics
 
 app = Flask(__name__)
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.jinja_env.cache = {}
 DB_PATH = "konfigurator.db"
 
 
@@ -17,7 +20,11 @@ def get_db_connection():
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    import os
+    template_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
+    with open(template_path, "r", encoding="utf-8") as f:
+        return f.read()
+
 
 
 @app.route("/api/mounting-types")

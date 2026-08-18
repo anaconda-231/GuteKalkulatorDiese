@@ -1,8 +1,12 @@
 <!DOCTYPE html>
+<!-- CACHE BUSTER: 2026-08-18T10:57:00Z -->
 <html lang="de">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>Lang AG – LED-Wand Konfigurator</title>
 <style>
     :root {
@@ -1195,6 +1199,7 @@
                             <option value="">-- Bitte wählen --</option>
                             <option value="brompton-tessera">Brompton Tessera</option>
                             <option value="novastar">Novastar</option>
+                            <option value="colorlight">Evision/Colorlight</option>
                         </select>
                     </div>
 
@@ -2319,19 +2324,25 @@
     const GENERIC_PART_WEIGHTS = {
         stacker: 6.1,          // Stacker 2H500
         nobase_stacker: 5.0,   // NoB Stacker 500er
-        nobase_diagonal: 2.5   // NoB Diagonale
+        nobase_diagonal: 2.5,  // NoB Diagonale
+        // Ruecksprache: "die Clamps wiegen 0,3" - gilt fuer die normale Clamp
+        // ueber alle Produkte hinweg. Die NoBase-Clamps sind davon
+        // ausgenommen, die weichen je Familie ab (nobase_clamp unten, z.B.
+        // LUNA 0,28).
+        clamp: 0.3,
+        // Curved Clamp: Ruecksprache "rechne fuer den Rest mit 0,97" - nur
+        // ARUNA (0,93) und LUGH/DB (0,92) haben eigene Werte, siehe unten.
+        clamp_curved: 0.97
     };
 
     const WEIGHT_BY_FAMILY = {
-        aura: { clamp: 0.3, clamp_curved: 0.97, nobase_clamp: 0.3 },
+        aura: { nobase_clamp: 0.3 },
         "aura-flex": {
-            clamp: 0.3,
-            clamp_curved: 0.97,
             nobase_clamp: 0.3,
             flex_base: 3.4,
             flex_single_foot: 0.56
         },
-        aruna: { clamp: 0.3, clamp_curved: 0.93, nobase_clamp: 0.3 },
+        aruna: { clamp_curved: 0.93, nobase_clamp: 0.3 },
         // "DB Clamp curved" = die Curved Clamp der DB-/LUGH-Reihe
         // (INFILED-DB-STKCL-C, siehe ARTICLE_BY_FAMILY.lugh).
         lugh: { clamp_curved: 0.92, nobase_clamp: 0.3 },
@@ -2339,12 +2350,13 @@
         // noch nicht vorliegt - explizit null, damit NICHT die 2H500-Werte
         // aus GENERIC_PART_WEIGHTS einfliessen.
         luna: { nobase_clamp: 0.28, stacker: null, nobase_stacker: null },
-        "jupiter-venus": { clamp: 0.3, nobase_clamp: 0.3, nobase_stacker: 5.0, stacker: null },
+        "jupiter-venus": { nobase_clamp: 0.3, nobase_stacker: 5.0, stacker: null },
         // ENKI: 2er/3er-Basement und Hanging-Bracket weichen von den
         // Aura-Werten ab. Der Stacker ist 3 Cabinets hoch (ENKI-ST-H3) und
         // deshalb ebenfalls nicht der generische 2H500.
-        enki: { base_w2: 12.5, base_w3: 17.3, truss_w2: 7.5, truss_w3: 11.5, stacker: null },
-        ar: { clamp_curved: 0.97 }
+        enki: { base_w2: 12.5, base_w3: 17.3, truss_w2: 7.5, truss_w3: 11.5, stacker: null }
+        // ar braucht keinen eigenen Eintrag mehr: die Curved Clamp der
+        // AR-Reihe liegt mit 0,97 genau auf dem generischen Wert.
     };
 
     // Gewicht eines Bauteils in kg, oder null wenn (noch) unbekannt.
@@ -4515,6 +4527,211 @@
                     }
                 }
             }
+        },
+        "colorlight": {
+            label: "Evision/Colorlight",
+            models: {
+                "hd102": {
+                    label: "HD102",
+                    ports: 4,
+                    maxDevicePixelsByFrequency: {
+                        50: 2760000,
+                        60: 2300000
+                    },
+                    receivingCards: {
+                        "standard": {
+                            label: "Standard",
+                            fiberClass: "1G",
+                            capacity: {
+                                8: {
+                                    50: 780000,
+                                    60: 650000
+                                }
+                            }
+                        },
+                        "evision_i9_plus_521": {
+                            label: "Evision i9+ 5.21",
+                            fiberClass: "1G",
+                            capacity: {
+                                8: {
+                                    50: 780000,
+                                    60: 650000
+                                }
+                            }
+                        },
+                        "evision_i6_1120": {
+                            label: "Evision i6 11.20",
+                            fiberClass: "1G",
+                            capacity: {
+                                8: {
+                                    50: 780000,
+                                    60: 650000
+                                }
+                            }
+                        },
+                        "evision_i9_plus_950": {
+                            label: "Evision i9+ 9.50",
+                            fiberClass: "1G",
+                            capacity: {
+                                8: {
+                                    50: 780000,
+                                    60: 650000
+                                }
+                            }
+                        }
+                    }
+                },
+                "z6": {
+                    label: "Z6",
+                    ports: 16,
+                    maxDevicePixelsByFrequency: {
+                        50: 10616832,
+                        60: 8847360,
+                        120: 4423680
+                    },
+                    receivingCards: {
+                        "standard": {
+                            label: "Standard",
+                            fiberClass: "1G",
+                            capacity: {
+                                8: {
+                                    50: 780000,
+                                    60: 650000,
+                                    120: 325000
+                                },
+                                10: {
+                                    50: 584000,
+                                    60: 487000,
+                                    120: 243000
+                                }
+                            }
+                        },
+                        "evision_i9_plus_521": {
+                            label: "Evision i9+ 5.21",
+                            fiberClass: "1G",
+                            capacity: {
+                                8: {
+                                    50: 780000,
+                                    60: 650000,
+                                    120: 325000
+                                },
+                                10: {
+                                    50: 584000,
+                                    60: 487000,
+                                    120: 243000
+                                }
+                            }
+                        },
+                        "evision_i6_1120": {
+                            label: "Evision i6 11.20",
+                            fiberClass: "1G",
+                            capacity: {
+                                8: {
+                                    50: 780000,
+                                    60: 650000,
+                                    120: 325000
+                                },
+                                10: {
+                                    50: 584000,
+                                    60: 487000,
+                                    120: 243000
+                                }
+                            }
+                        },
+                        "evision_i9_plus_950": {
+                            label: "Evision i9+ 9.50",
+                            fiberClass: "1G",
+                            capacity: {
+                                8: {
+                                    50: 780000,
+                                    60: 650000,
+                                    120: 325000
+                                },
+                                10: {
+                                    50: 584000,
+                                    60: 487000,
+                                    120: 243000
+                                }
+                            }
+                        }
+                    }
+                },
+                "ev4": {
+                    label: "EV4",
+                    ports: 4,
+                    maxDevicePixelsByFrequency: {
+                        50: 10616832,
+                        60: 8847360,
+                        120: 4423680
+                    },
+                    receivingCards: {
+                        "standard": {
+                            label: "Standard",
+                            fiberClass: "1G",
+                            capacity: {
+                                8: {
+                                    50: 7800000,
+                                    60: 6550000,
+                                    120: 3275000
+                                },
+                                10: {
+                                    50: 5890000,
+                                    60: 4910000,
+                                    120: 2450000
+                                }
+                            }
+                        },
+                        "evision_i9_plus_521": {
+                            label: "Evision i9+ 5.21",
+                            fiberClass: "1G",
+                            capacity: {
+                                8: {
+                                    50: 7800000,
+                                    60: 6550000,
+                                    120: 3275000
+                                },
+                                10: {
+                                    50: 5890000,
+                                    60: 4910000,
+                                    120: 2450000
+                                }
+                            }
+                        },
+                        "evision_i6_1120": {
+                            label: "Evision i6 11.20",
+                            fiberClass: "1G",
+                            capacity: {
+                                8: {
+                                    50: 7800000,
+                                    60: 6550000,
+                                    120: 3275000
+                                },
+                                10: {
+                                    50: 5890000,
+                                    60: 4910000,
+                                    120: 2450000
+                                }
+                            }
+                        },
+                        "evision_i9_plus_950": {
+                            label: "Evision i9+ 9.50",
+                            fiberClass: "1G",
+                            capacity: {
+                                8: {
+                                    50: 7800000,
+                                    60: 6550000,
+                                    120: 3275000
+                                },
+                                10: {
+                                    50: 5890000,
+                                    60: 4910000,
+                                    120: 2450000
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     };
 
@@ -4533,7 +4750,7 @@
     // AURA/AURA FLEX: nur mit XA50 Pro (5G-Empfangskarte) bestueckbar
     // -> nur Novastar-Controller, die eine 5G-Karte verarbeiten koennen.
     const XA50_PRO_ONLY_COMPAT = {
-        brands: ["novastar"],
+        brands: ["novastar", "colorlight"],
         models: { novastar: ["cx40", "mx2000", "mx6000"] },
         cards: { cx40: ["xa50_pro"], mx2000: ["xa50_pro"], mx6000: ["xa50_pro"] }
     };
@@ -4541,30 +4758,62 @@
     // statt der XA50 Pro (beides 5G-Empfangskarten derselben Kapazitaets-
     // klasse, siehe CONTROLLER_DB).
     const CA50E_ONLY_COMPAT = {
-        brands: ["novastar"],
+        brands: ["novastar", "colorlight"],
         models: { novastar: ["cx40", "mx2000", "mx6000"] },
         cards: { cx40: ["ca50e"], mx2000: ["ca50e"], mx6000: ["ca50e"] }
     };
     // VENUS/JUPITER: nur Brompton Tessera, nur mit der R2-Empfangskarte.
     const R2_ONLY_COMPAT = {
-        brands: ["brompton-tessera"],
+        brands: ["brompton-tessera", "colorlight"],
         models: { "brompton-tessera": ["sx40", "s8"] },
         cards: { sx40: ["r2"], s8: ["r2"] }
+    };
+    // BM4 Produkte und Colorlight: temporaerer Einsatz soll fest auf
+    // Evision/Colorlight laufen, daher nur diese Marke und die Standard-
+    // Colorlight-Modelle ohne alternativen Hersteller.
+    const BM4_MATTE_COMPAT = {
+        brands: ["colorlight"],
+        models: { colorlight: ["hd102", "z6", "ev4"] },
+        cards: {
+            hd102: ["evision_i9_plus_521"],
+            z6: ["evision_i9_plus_521"],
+            ev4: ["evision_i9_plus_521"]
+        }
+    };
+    const BM4_GLOSSY_COMPAT = {
+        brands: ["colorlight"],
+        models: { colorlight: ["hd102", "z6", "ev4"] },
+        cards: {
+            hd102: ["evision_i6_1120", "evision_i9_plus_950"],
+            z6: ["evision_i6_1120", "evision_i9_plus_950"],
+            ev4: ["evision_i6_1120", "evision_i9_plus_950"]
+        }
     };
     // LIAM und alle Panels ohne eigene Regel: nur Novastar, nur mit der
     // A10s Pro / A8s Pro-Empfangskarte (Ruecksprache) - diese Karte gibt es
     // laut CONTROLLER_DB nur bei MX40/MX30/MX20, nicht bei CX40/MX2000/
     // MX6000 (reine 5G-Karten dort).
     const A10S_PRO_ONLY_COMPAT = {
-        brands: ["novastar"],
+        brands: ["novastar", "colorlight"],
         models: { novastar: ["mx40", "mx30", "mx20"] },
         cards: { mx40: ["a10s_a8s_pro"], mx30: ["a10s_a8s_pro"], mx20: ["a10s_a8s_pro"] }
     };
-    // AR 10.41 / AR3.91 Plus LE / Avora Root / LUGH: nur Novastar mit der
+    // AR 10.41: nur Novastar MCTRL-Controller, keine Armor Series.
+    const MCTRL_ONLY_COMPAT = {
+        brands: ["novastar"],
+        models: { novastar: ["mctrl4k", "mctrlr5", "mctrl660pro", "mctrl300"] },
+        cards: {
+            mctrl4k: ["standard"],
+            mctrlr5: ["standard"],
+            mctrl660pro: ["standard"],
+            mctrl300: ["standard"]
+        }
+    };
+    // AR3.91 Plus LE / Avora Root / LUGH: nur Novastar mit der
     // Armor Series (Ruecksprache) - diese Karte gibt es laut CONTROLLER_DB
     // nur bei MX40/MX30/MX20.
     const ARMOR_ONLY_COMPAT = {
-        brands: ["novastar"],
+        brands: ["novastar", "colorlight"],
         models: { novastar: ["mx40", "mx30", "mx20"] },
         cards: { mx40: ["armor"], mx30: ["armor"], mx20: ["armor"] }
     };
@@ -4575,18 +4824,20 @@
         "LANG-010": R2_ONLY_COMPAT,       // VENUS
         "LANG-005": R2_ONLY_COMPAT,       // JUPITER
         "LANG-007": A10S_PRO_ONLY_COMPAT, // LIAM
-        "LANG-012": ARMOR_ONLY_COMPAT,    // AR 10.41
+        "LANG-012": MCTRL_ONLY_COMPAT,    // AR 10.41
         "LANG-001": ARMOR_ONLY_COMPAT,    // AR3.91 Plus LE
         "LANG-020": ARMOR_ONLY_COMPAT,    // Avora Root
-        "LANG-008": ARMOR_ONLY_COMPAT     // LUGH
+        "LANG-008": ARMOR_ONLY_COMPAT,    // LUGH
+        "LANG-014": BM4_MATTE_COMPAT, // Black Marble 4 (matt)
+        "LANG-015": BM4_GLOSSY_COMPAT // Black Marble 4 (glossy)
     };
-    // Vanish V8T und Black Marble 4 (matt/glaenzend): Empfangskarte laut
-    // Ruecksprache "noch keine" - bewusst KEINE Einschraenkung, damit die
-    // komplette CONTROLLER_DB waehlbar bleibt, bis die Karte feststeht.
+    // Vanish V8T: Empfangskarte laut Ruecksprache "noch keine" - bewusst
+    // KEINE Einschraenkung, damit die komplette CONTROLLER_DB waehlbar bleibt,
+    // bis die Karte feststeht. Black Marble 4 hat dagegen bereits feste
+    // Evision-/Colorlight-Karten und darf deshalb nicht durch diese Ausnahme
+    // unbeschraenkt bleiben.
     const NO_CARD_COMPAT_PRODUCTS = new Set([
-        "LANG-011", // Vanish V8T
-        "LANG-014", // Black Marble 4 (matte)
-        "LANG-015"  // Black Marble 4 (glossy)
+        "LANG-011" // Vanish V8T
     ]);
     // Alle uebrigen Panels (kein Eintrag oben): A10s Pro / A8s Pro
     // (Ruecksprache "Rest A10s Pro").
