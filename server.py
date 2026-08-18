@@ -20,10 +20,14 @@ def get_db_connection():
 
 @app.route("/")
 def index():
-    import os
-    template_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
-    with open(template_path, "r", encoding="utf-8") as f:
-        return f.read()
+    # Vorher wurde die Datei roh per open()/read() zurueckgegeben - dabei
+    # lief index.html NIE durch Jinja, wodurch {{ url_for('static', ...) }}
+    # (Sidebar-Logo UND PDF-Logo) woertlich als Text an den Browser ging und
+    # das Logo nirgends geladen werden konnte. render_template() rendert die
+    # Jinja-Ausdruecke korrekt, TEMPLATES_AUTO_RELOAD/jinja_env.cache={} oben
+    # sorgen weiterhin dafuer, dass Aenderungen an index.html ohne
+    # Server-Neustart sichtbar werden.
+    return render_template("index.html")
 
 
 
