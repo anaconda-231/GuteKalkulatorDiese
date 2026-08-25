@@ -134,6 +134,19 @@
         flex: 1;
     }
 
+    /* Einheiten-Umschalter unter Breite/Hoehe (Cabinets vs. Meter) */
+    .radio-row {
+        display: flex;
+        gap: 18px;
+    }
+
+    .dimension-hint {
+        margin: 6px 0 0;
+        font-size: 0.8rem;
+        color: #c6c6c6;
+        min-height: 1em;
+    }
+
     .section-title {
         font-size: 0.82rem;
         text-transform: uppercase;
@@ -195,6 +208,14 @@
         font-size: 0.82rem;
         line-height: 1.4;
         color: var(--text);
+    }
+
+    /* Produktbemerkung mit Vorbehalt (z.B. "Werte sind eine Schaetzung") -
+       bewusst warnfarbig statt in Akzentblau, damit sie nicht wie ein
+       normaler Zusatzhinweis wirkt. */
+    .spec-note-warning {
+        background: rgba(234, 179, 8, 0.12);
+        border-color: #eab308;
     }
 
     .summary-card {
@@ -1058,13 +1079,31 @@
 
         <div class="dimension-row">
             <div class="field-group">
-                <label for="cabinets-width">Cabinets (Breite)</label>
+                <label for="cabinets-width" id="width-label">Cabinets (Breite)</label>
                 <input type="number" id="cabinets-width" min="1" step="1" value="1">
             </div>
             <div class="field-group">
-                <label for="cabinets-height">Cabinets (Höhe)</label>
+                <label for="cabinets-height" id="height-label">Cabinets (Höhe)</label>
                 <input type="number" id="cabinets-height" min="1" step="1" value="1">
             </div>
+        </div>
+
+        <!-- Eingabeeinheit fuer Breite/Hoehe (Ruecksprache): entweder direkt
+             in Cabinets oder in Metern - Meter werden ueber die Cabinet-Masse
+             des gewaehlten Produkts in ganze Cabinets umgerechnet (siehe
+             getCabinetCounts/renderDimensionHint). -->
+        <div class="field-group" id="dimension-unit-group">
+            <div class="radio-row">
+                <label class="radio-option">
+                    <input type="radio" name="dimension-unit" value="cabinets" checked>
+                    Cabinets
+                </label>
+                <label class="radio-option">
+                    <input type="radio" name="dimension-unit" value="meter">
+                    Meter
+                </label>
+            </div>
+            <p class="dimension-hint" id="dimension-hint"></p>
         </div>
 
         <div class="field-group" id="curving-mode-group" style="display:none;">
@@ -1289,6 +1328,12 @@
         "Standard-Stacking": "Stacking",
         "NoBase": "No-Base",
         "AR-Stacking": "Stacking",
+        // Outdoor-Variante der AR-Familie - im Dropdown steht sie an
+        // derselben Stelle wie jedes andere Stacking, deshalb dasselbe
+        // Label. Angeboten wird sie ohnehin nur bei Einsatzort Outdoor und
+        // dann anstelle des Indoor-Systems (siehe SYSTEM_LOCATION_ONLY in
+        // server.py), es kann also keine zwei "Stacking"-Eintraege geben.
+        "AR-Outdoor-Stacking": "Stacking",
         "Flex-Stacking": "Stacking",
         "Vanish-Stacking": "Stacking",
         "Hanging-Truss": "Hanging",
@@ -1308,6 +1353,13 @@
     const mountingTypeGroup = document.getElementById("mounting-type-group");
     const widthInput = document.getElementById("cabinets-width");
     const heightInput = document.getElementById("cabinets-height");
+    const widthLabelEl = document.getElementById("width-label");
+    const heightLabelEl = document.getElementById("height-label");
+    const dimensionHintEl = document.getElementById("dimension-hint");
+    // Zuletzt berechnetes Cabinet-Raster - gebraucht, um beim Umschalten der
+    // Eingabeeinheit (Cabinets <-> Meter) die Wandgroesse beizubehalten,
+    // statt die Rohzahl im Feld einfach umzudeuten.
+    let lastCabinetCounts = { cols: 1, rows: 1 };
     const personContactInput = document.getElementById("person-contact");
     const personContactGroup = document.getElementById("person-contact-group");
     const curvingModeGroup = document.getElementById("curving-mode-group");
@@ -1483,7 +1535,14 @@
             return;
         }
 
+        // Einsatzort mitschicken: er entscheidet, ob die AR-Familie das
+        // Indoor- oder das Outdoor-Stacking angeboten bekommt (siehe
+        // SYSTEM_LOCATION_ONLY in server.py). Ein Wechsel des Einsatzorts
+        // setzt die Produktauswahl ohnehin zurueck (resetModelSelect),
+        // wodurch diese Funktion danach neu laeuft.
         const params = new URLSearchParams({ product_id: productId });
+        const { location } = getPreFilter();
+        if (location) params.set("location", location);
         const response = await fetch(`/api/mechanics-options?${params.toString()}`);
         const data = await response.json();
         const modes = data.modes || [];
@@ -1538,7 +1597,8 @@
     // ueberhaupt Gradstufen hinterlegt hat (curving_degree_steps aus
     // /api/mechanics-options, leer = Produkt nicht curving-faehig).
     const CURVING_CAPABLE_SYSTEM_NAMES = new Set([
-        "Standard-Stacking", "AR-Stacking", "Hanging-Truss", "AR-Hanging", "LIAM-Truss"
+        "Standard-Stacking", "AR-Stacking", "Hanging-Truss", "AR-Hanging", "LIAM-Truss",
+        "AR-Outdoor-Stacking"
     ]);
     let curvingDegreeSteps = [];
 
@@ -1602,6 +1662,18 @@
             ? '<p class="spec-note">Jedes Cabinet lässt sich einzeln um bis zu 45° konvex und konkav curven. Für eine Säule werden mindestens 8 Cabinets benötigt.</p>'
             : "";
 
+        // Durchschnittsleistung und Produktbemerkung sind nur bei einzelnen
+        // Produkten hinterlegt (siehe ar_avora_500x500_values.sql) - wo sie
+        // fehlen, entfaellt die Zeile komplett statt "–" zu zeigen. Die
+        // Auslegung (Stromkreise, Gesamtleistung) rechnet unveraendert mit
+        // dem Maximalwert, der Durchschnitt ist eine reine Zusatzangabe.
+        const avgPowerRowHtml = product.avg_power_consumption_w
+            ? `<div class="spec-row"><span class="k">Ø Stromverbrauch</span><span class="v">${product.avg_power_consumption_w} W</span></div>`
+            : "";
+        const productNoteHtml = product.note
+            ? `<p class="spec-note spec-note-warning">${product.note}</p>`
+            : "";
+
         detailsEl.innerHTML = `
             <div class="spec-card">
                 <div class="spec-card-header">
@@ -1614,43 +1686,62 @@
                     <div class="spec-row"><span class="k">Auflösung (pro Cabinet)</span><span class="v">${resolutionText}</span></div>
                     <div class="spec-row"><span class="k">Gewicht</span><span class="v">${product.weight_kg} kg</span></div>
                     <div class="spec-row"><span class="k">Max. Stromverbrauch</span><span class="v">${product.max_power_consumption_w} W</span></div>
+                    ${avgPowerRowHtml}
                 </div>
+                ${productNoteHtml}
                 ${auraFlexNoteHtml}
             </div>
         `;
     }
 
-    function renderSummary(product, cols, rows, mechanicsResult = MECHANICS_PENDING) {
+    function renderSummary(product, cols, rows, mechanicsResult = MECHANICS_PENDING, halfRow = 0) {
         if (!product) {
             summaryEl.innerHTML = '<p class="placeholder">Noch keine Wand konfiguriert.</p>';
             toolbarTotalsEl.innerHTML = "";
             return;
         }
 
+        // Gewicht/Leistung/Hoehe kommen aus getCabinetTotals, weil das halbe
+        // Cabinet eigene Datenblattwerte hat und nicht einfach das halbe volle
+        // Cabinet ist (siehe half_top_row_setup.sql).
+        const totals = getCabinetTotals(product, cols, rows, halfRow);
         const totalWidthMm = product.width_mm * cols;
-        const totalHeightMm = product.height_mm * rows;
-        const totalWeightKg = product.weight_kg * cols * rows;
-        const totalPowerW = product.max_power_consumption_w * cols * rows;
-        const cabinetCount = cols * rows;
+        const totalHeightMm = totals.heightMm;
+        const totalWeightKg = totals.weightKg;
+        const totalPowerW = totals.powerW;
+        const cabinetCount = totals.cabinetCount;
         const resolution = getCabinetResolutionPx(product);
+        // Das halbe Cabinet hat denselben Pixelpitch, also halb so viele
+        // Pixelzeilen wie ein volles.
+        const halfResolutionPx = resolution && halfRow
+            ? Math.round((resolution.heightPx * product.half_height_mm) / product.height_mm)
+            : 0;
         const totalResolutionText = resolution
-            ? `${resolution.widthPx * cols} × ${resolution.heightPx * rows} px`
+            ? `${resolution.widthPx * cols} × ${resolution.heightPx * rows + halfResolutionPx} px`
             : "–";
-        const weightBreakdown = getWallWeightBreakdown(totalWeightKg, mechanicsResult, product);
+        const weightBreakdown = getWallWeightBreakdown(totalWeightKg, mechanicsResult, product, cols, rows, halfRow);
+
+        const rasterText = halfRow
+            ? `${cols} × ${rows} + ${cols} halbe`
+            : `${cols} × ${rows}`;
+        const halfNote = halfRow
+            ? `<p class="spec-note" style="margin:10px 0 0;">Oberste Reihe: ${cols} × ${product.half_article_name} (halbes Cabinet) – ohne Stacker und Clamp.</p>`
+            : "";
 
         summaryEl.innerHTML = `
-            <div class="spec-row" style="padding:0;"><span class="k">Cabinets gesamt</span><span class="v">${cabinetCount}</span></div>
+            <div class="spec-row" style="padding:0;"><span class="k">Cabinets gesamt</span><span class="v">${cabinetCount}${halfRow ? ` (davon ${totals.halfCount} halbe)` : ""}</span></div>
             <div class="spec-row" style="padding:0;"><span class="k">Abmessungen</span><span class="v">${(totalWidthMm/1000).toFixed(2)} × ${(totalHeightMm/1000).toFixed(2)} m</span></div>
             <div class="spec-row" style="padding:0;"><span class="k">Auflösung</span><span class="v">${totalResolutionText}</span></div>
             <div class="spec-row" style="padding:0;"><span class="k">Gewicht</span><span class="v">${totalWeightKg.toFixed(1)} kg</span></div>
             <div class="spec-row" style="padding:0;"><span class="k">Gewicht Zubehör</span><span class="v">${weightBreakdown.accessoryText}</span></div>
             <div class="spec-row" style="padding:0;"><span class="k">Gesamtgewicht der Wand</span><span class="v">${weightBreakdown.totalText}</span></div>
             <div class="spec-row" style="padding:0;"><span class="k">Leistung</span><span class="v">${(totalPowerW/1000).toFixed(2)} kW</span></div>
+            ${halfNote}
             ${weightBreakdown.note ? `<p class="spec-note" style="margin:10px 0 0;">${weightBreakdown.note}</p>` : ""}
         `;
 
         toolbarTotalsEl.innerHTML = `
-            <span><b>${cols} × ${rows}</b> Cabinets</span>
+            <span><b>${rasterText}</b> Cabinets</span>
             <span><b>${(totalWidthMm/1000).toFixed(2)} × ${(totalHeightMm/1000).toFixed(2)} m</b></span>
             <span><b>${totalResolutionText}</b></span>
             <span><b>${totalWeightKg.toFixed(1)} kg</b></span>
@@ -1661,7 +1752,7 @@
     // ------------------------------------------------------------------
     // Stücklisten-Berechnung (Mechanik)
     // ------------------------------------------------------------------
-    async function fetchMechanics(productId, cols, rows, systemName, personContact) {
+    async function fetchMechanics(productId, cols, rows, systemName, personContact, halfTopRow) {
         // location wird gebraucht, sobald ein System (aktuell LIAM-Truss)
         // Indoor/Outdoor unterscheidet (Raster + Sicherheitsfaktor, siehe
         // liam_truss.py) - andere Systeme ignorieren den Parameter serverseitig.
@@ -1674,6 +1765,9 @@
             person_contact: personContact ? "true" : "false"
         });
         if (location) params.set("location", location);
+        // Halbe oberste Reihe: aendert die Stueckliste nicht, zaehlt aber fuer
+        // die Statik-Hoehengrenze mit (siehe calculate_mechanics).
+        if (halfTopRow) params.set("half_top_row", "true");
         // Curving nur mitschicken, wenn das Dropdown ueberhaupt sichtbar UND
         // nicht auf "flat" steht - server.py lehnt curving_mode fuer nicht
         // curving-faehige Systeme ohnehin ab (siehe CURVING_CAPABLE_SYSTEMS).
@@ -1811,6 +1905,35 @@
             // bei AR3.9 deshalb immer 0 (server.py) und die Zeile unsichtbar.
             { key: "stacker", label: "Stacker", color: "#22c55e", weightKg: null },
             { key: "clamps", label: "Clamp", color: "#f97316", weightKg: null },
+            { key: "curving_clamp", label: "Curving-Clamp", color: "#ec4899", showIf: r => r.curving_clamp > 0, weightKg: null },
+            { key: "ausleger_lang", label: "L-Extension hinten", color: "#a855f7", weightKg: null },
+            { key: "ausleger_kurz", label: r => r.pipe_count > 0 ? "K-Extension" : "Kurze Extension", color: "#c084fc", weightKg: null },
+            { key: "diagonale_lang", label: "Lange Diagonale", color: "#f59e0b", weightKg: null },
+            { key: "diagonale_kurz", label: "Kurze Diagonale", color: "#fbbf24", weightKg: null },
+            { key: "attachment", label: "Attachment", color: "#14b8a6", weightKg: null },
+            { key: "pipe_count", label: r => `Pipe${r.pipe_length_m ? ` (Länge: ${r.pipe_length_m} m)` : ""}`, color: "#7c3aed", weightKg: null }
+        ],
+        // AR3.9 / Avora Root Outdoor-Stacking: derselbe Aufbau und dieselbe
+        // Rechnung wie AR-Stacking (server.py nutzt fuer beide
+        // _calculate_ar_stacking_mechanics) - eigenes System nur, weil im
+        // Outdoor-Baukasten andere Bauteile mit eigenen Vertriebsnummern
+        // stecken (INFILED-ER-*, siehe ARTICLE_PART_BY_SYSTEM). Der Zusatz
+        // "(Outdoor)" in den Bezeichnungen macht im Bericht sofort sichtbar,
+        // dass hier nicht die Indoor-Teile gemeint sind.
+        "AR-Outdoor-Stacking": [
+            { key: "basements_3", label: "Basement (3er, Outdoor)", color: "#6b7280", weightKg: null },
+            { key: "basements_2", label: "Basement (2er, Outdoor)", color: "#6b7280", weightKg: null },
+            { key: "basements_1", label: "Basement (1er, Outdoor)", color: "#6b7280", weightKg: null },
+            // Footbeam sitzt unter dem Basement und kommt unter jede
+            // Cabinetspalte (Ruecksprache) - footbeams = width_cabinets,
+            // damit ist jede Spalte abgesichert.
+            { key: "footbeams", label: "Footbeam 1 m (Outdoor)", color: "#9ca3af", weightKg: null },
+            // Kein Single Foot im Outdoor-Baukasten (Ruecksprache) - server.py
+            // liefert single_feet=0, die Zeile entfaellt deshalb komplett.
+            // Stacker ist 1 m lang, also genau 1 Cabinet hoch - deshalb einer
+            // je Cabinet, und darauf oben mittig genau eine Clamp.
+            { key: "stacker", label: "Stacker H1 (Outdoor)", color: "#22c55e", weightKg: null },
+            { key: "clamps", label: "Single Clamp (Outdoor)", color: "#f97316", weightKg: null },
             { key: "curving_clamp", label: "Curving-Clamp", color: "#ec4899", showIf: r => r.curving_clamp > 0, weightKg: null },
             { key: "ausleger_lang", label: "L-Extension hinten", color: "#a855f7", weightKg: null },
             { key: "ausleger_kurz", label: r => r.pipe_count > 0 ? "K-Extension" : "Kurze Extension", color: "#c084fc", weightKg: null },
@@ -1986,6 +2109,10 @@
         "AR3.91 Plus LE": "ar",
         "AR 10.41": "ar",
         "Avora Root": "ar",
+        // Halbe Cabinets (500x500): identische Bauteile, nur ein anderes
+        // Panel darueber - dieselbe Artikelnummern-Familie.
+        "AR3.91 Plus LE 500x500": "ar",
+        "Avora Root 500x500": "ar",
         "ENKI": "enki",
         // LIAM und Vanish V8T haengen jeweils an eigenen, exklusiven
         // Systemen (siehe product_mechanics) - ihre Bauteile teilen sich
@@ -2036,6 +2163,21 @@
             stacker: "stacker",
             clamps: "clamp",
             curving_clamp: "clamp_curved",
+            ...AURA_ACCESSORY_PARTS
+        },
+        // Outdoor-Baukasten der AR-Familie: eigene Bauteil-IDs (er_*), damit
+        // NICHT die Indoor-Nummern bzw. die generischen Teile (Footbeam
+        // INFiLED-s1.8-FB-520, Stacker 2H500, Clamp AURA-STKCL) einfliessen -
+        // das sind physisch andere Bauteile. Extensions/Diagonalen sind
+        // unveraendert die generischen, dafuer wurde kein Outdoor-Pendant
+        // genannt.
+        "AR-Outdoor-Stacking": {
+            basements_3: "er_base_w3",
+            basements_2: "er_base_w2",
+            basements_1: "er_base_w1",
+            footbeams: "er_footbeam",
+            stacker: "er_stacker",
+            clamps: "er_clamp",
             ...AURA_ACCESSORY_PARTS
         },
         "Flex-Stacking": {
@@ -2280,7 +2422,17 @@
             truss_w3: "INFILED-ER-TRUSS-W3",
             clamp: "INFiLED-AR-STKCL",
             clamp_curved: "INFiLED-AR-STKCL-C",
-            wandadapter: "INFiLED-DB-AR-WA"
+            wandadapter: "INFiLED-DB-AR-WA",
+            // Outdoor-Stacking (System "AR-Outdoor-Stacking"): kompletter
+            // eigener Baukasten. Der Footbeam ist 1 m lang und sitzt unter
+            // jeder Cabinetspalte, der Stacker ist mit 1 m genau ein Cabinet
+            // hoch, die Single Clamp sitzt oben mittig auf jedem Cabinet.
+            er_base_w1: "INFILED-ER-FOOT-W1",
+            er_base_w2: "INFILED-ER-FOOT-W2",
+            er_base_w3: "INFILED-ER-FOOT-W3",
+            er_footbeam: "INFILED-ER-FBEAM-L1m",
+            er_stacker: "INFILED-ER-STACK-H1",
+            er_clamp: "INFILED-ER-CLP-SINGL"
         }
     };
 
@@ -2435,6 +2587,23 @@
     const WEIGHT_EXCLUDED_KEYS = new Set(["pipe_count", "rohrschellen", "attachment"]);
     const WEIGHT_EXCLUSION_NOTE = "Berechnet ohne Pipe und Rohrschellen/Attachment (kein Gewicht hinterlegt).";
 
+    // Verkabelungsgewicht (Ruecksprache): pauschal pro Cabinet plus pauschal
+    // je Stromzuleitung - haengt nicht an der Mechanik-Stueckliste, sondern
+    // am Kabelplan, und wird deshalb separat zum Zubehoergewicht addiert.
+    const CABLING_WEIGHT_PER_CABINET_KG = 0.43;
+    const CABLING_WEIGHT_PER_POWER_FEED_KG = 0.67;
+
+    // Anzahl Stromzuleitungen = Anzahl Stromkreise, in die der Kabelplan das
+    // Raster zerlegt (siehe Visualizer.countWiringGroups) - bewusst dieselbe
+    // Zerlegung wie die gezeichneten roten Straenge, nicht das gerundete
+    // ceil(Cabinets / Kapazitaet). Liefert null, wenn sich die Kapazitaet
+    // mangels Leistungsaufnahme nicht bestimmen laesst.
+    function getPowerFeedCount(product, cols, rows) {
+        const maxPerCircuit = getMaxCabinetsPerCircuit(product);
+        if (!maxPerCircuit || maxPerCircuit < 1) return null;
+        return Visualizer.countWiringGroups(cols, rows, maxPerCircuit, getWiringDirection(product));
+    }
+
     // Gewichtsuebersicht fuer die Wand-Zusammenfassung (renderSummary):
     // "Gewicht Zubehör" = Gewicht ALLER mechanischen Bauteile (komplette
     // Stückliste Mechanik, nicht nur die ACCESSORY_MECHANICS_KEYS-Teilmenge -
@@ -2444,26 +2613,39 @@
     // Positionen auch nur ein Gewicht noch unbekannt ist (siehe
     // getRowWeightKg - Werte folgen laut Ruecksprache noch), wird bewusst
     // "–" statt einer unvollstaendigen Zahl angezeigt. product wird fuer die
-    // produktabhaengigen Gewichte gebraucht (WEIGHT_BY_FAMILY).
-    function getWallWeightBreakdown(cabinetWeightKg, mechanicsResult, product) {
+    // produktabhaengigen Gewichte gebraucht (WEIGHT_BY_FAMILY), cols/rows
+    // fuer den Verkabelungsanteil (Cabinets + Stromzuleitungen).
+    function getWallWeightBreakdown(cabinetWeightKg, mechanicsResult, product, cols, rows, halfRow = 0) {
         const PENDING_TEXT = "…";
         const UNKNOWN_TEXT = "–";
 
         if (mechanicsResult === MECHANICS_PENDING) {
             return { accessoryText: PENDING_TEXT, totalText: PENDING_TEXT, note: null };
         }
-        if (!mechanicsResult) {
-            // Kein Mechanik-System gewaehlt/verfuegbar - keine Zubehoerteile
-            // verbaut, Gesamtgewicht ist dann exakt das Cabinet-Gewicht.
-            return { accessoryText: "0.0 kg", totalText: `${cabinetWeightKg.toFixed(1)} kg`, note: null };
-        }
-        if (mechanicsResult.error) {
+
+        // Verkabelung haengt nicht am Mechanik-System, sondern nur am Raster -
+        // faellt also auch dann an, wenn gar keine Montageart hinterlegt ist.
+        // Auch die halbe oberste Reihe wird verkabelt - sie zaehlt hier wie
+        // eine volle Reihe (siehe drawWiring).
+        const wiringRows = rows + (halfRow ? 1 : 0);
+        const cabinetCount = cols * wiringRows;
+        const feedCount = getPowerFeedCount(product, cols, wiringRows);
+        const cablingKg = feedCount === null
+            ? null
+            : CABLING_WEIGHT_PER_CABINET_KG * cabinetCount + CABLING_WEIGHT_PER_POWER_FEED_KG * feedCount;
+        const cablingNote = feedCount === null
+            ? null
+            : `Inkl. Verkabelung: ${CABLING_WEIGHT_PER_CABINET_KG.toFixed(2)} kg × ${cabinetCount} Cabinets + ${CABLING_WEIGHT_PER_POWER_FEED_KG.toFixed(2)} kg × ${feedCount} Stromzuleitung${feedCount === 1 ? "" : "en"}.`;
+
+        if (mechanicsResult && mechanicsResult.error) {
             return { accessoryText: UNKNOWN_TEXT, totalText: UNKNOWN_TEXT, note: null };
         }
 
         let mechanicsKg = 0;
-        let hasUnknownWeight = false;
-        for (const row of getUsedMechanicsRows(mechanicsResult)) {
+        let hasUnknownWeight = cablingKg === null;
+        // Kein Mechanik-System gewaehlt/verfuegbar: keine Bauteile verbaut,
+        // es bleibt allein der Verkabelungsanteil.
+        for (const row of mechanicsResult ? getUsedMechanicsRows(mechanicsResult) : []) {
             if (WEIGHT_EXCLUDED_KEYS.has(row.key)) continue;
             const weightKg = getRowWeightKg(row, mechanicsResult, product);
             if (weightKg == null) {
@@ -2476,10 +2658,11 @@
         if (hasUnknownWeight) {
             return { accessoryText: UNKNOWN_TEXT, totalText: UNKNOWN_TEXT, note: null };
         }
+        const accessoryKg = mechanicsKg + cablingKg;
         return {
-            accessoryText: `${mechanicsKg.toFixed(1)} kg`,
-            totalText: `${(cabinetWeightKg + mechanicsKg).toFixed(1)} kg`,
-            note: WEIGHT_EXCLUSION_NOTE
+            accessoryText: `${accessoryKg.toFixed(1)} kg`,
+            totalText: `${(cabinetWeightKg + accessoryKg).toFixed(1)} kg`,
+            note: `${WEIGHT_EXCLUSION_NOTE} ${cablingNote}`
         };
     }
 
@@ -2489,6 +2672,7 @@
         "Standard-Stacking": "Automatische Statik-Konfiguration",
         "NoBase": "Automatische Statik-Konfiguration",
         "AR-Stacking": "Automatische Statik-Konfiguration",
+        "AR-Outdoor-Stacking": "Automatische Statik-Konfiguration",
         "Flex-Stacking": "Automatische Statik-Konfiguration",
         "Hanging-Truss": "Aktuelles Setup",
         "Flex-Hanging": "Aktuelles Setup"
@@ -2540,7 +2724,9 @@
     // zeigt fehlender result.ballast (Produkt oder Hoehe noch ohne
     // hinterlegte Werte, siehe BALLAST_TABLE_BY_PRODUCT) bewusst einen
     // Platzhaltertext statt einer geschaetzten Zahl.
-    const BALLAST_CAPABLE_SYSTEMS = new Set(["Standard-Stacking", "NoBase", "AR-Stacking", "Flex-Stacking"]);
+    const BALLAST_CAPABLE_SYSTEMS = new Set([
+        "Standard-Stacking", "NoBase", "AR-Stacking", "Flex-Stacking", "AR-Outdoor-Stacking"
+    ]);
 
     function renderBallastCard(result) {
         if (!result || result.error || !BALLAST_CAPABLE_SYSTEMS.has(result.system)) {
@@ -3631,7 +3817,12 @@
                 return;
             }
 
-            if (components.system === "AR-Stacking") {
+            // AR-Outdoor-Stacking teilt sich die Zeichnung mit AR-Stacking:
+            // die Geometrie ist identisch (Footbeam 1:1 pro Cabinetspalte,
+            // Stacker ueber genau 1 Reihe, 1 Clamp oben mittig je Cabinet) -
+            // nur die verbauten Bauteile/Artikelnummern unterscheiden sich,
+            // und die stecken in der Stueckliste, nicht in der Grafik.
+            if (components.system === "AR-Stacking" || components.system === "AR-Outdoor-Stacking") {
                 // AR3.9 nutzt woertlich denselben Zeichen-Code wie Standard-
                 // Stacking (Ruecksprache: Visualisierung 1:1 wie bei Aura) -
                 // drawFootbeamsAndSingleFeet/drawStackersAndClamps werden
@@ -3651,7 +3842,11 @@
                 // deshalb immer 0 - keine eigene Curving-Clamp-Verzweigung.
                 const arBasementsBottomY = drawBasements(layout, components);
                 const arFootbeamAnchorXs = drawFootbeamsAndSingleFeet(layout, cols, arBasementsBottomY, undefined, undefined, 1);
-                drawStackersAndClamps(layout, rows, arFootbeamAnchorXs, undefined, undefined, 1);
+                // bandRows kommt vom Backend: 1 bei den 1000er-Cabinets (der
+                // Stacker ist dort genau eine Reihe hoch), 2 bei den halben
+                // 500er-Cabinets - der 1-m-Stacker ueberspannt dort zwei
+                // Reihen (siehe _ar_stacker_span_rows in server.py).
+                drawStackersAndClamps(layout, rows, arFootbeamAnchorXs, undefined, undefined, components.stacker_band_rows || 1);
                 return;
             }
 
@@ -3716,7 +3911,7 @@
         // auch im Curving-Modus, da die reine 2D-Bogen-Illusion keine eigene
         // Layout-Berechnung mehr braucht (siehe drawCurvingCabinetCells).
         function getBandReserves(system) {
-            const bottomReserve = (system === "Standard-Stacking" || system === "AR-Stacking" || system === "Flex-Stacking") ? MECHANICS_BAND_H
+            const bottomReserve = (system === "Standard-Stacking" || system === "AR-Stacking" || system === "AR-Outdoor-Stacking" || system === "Flex-Stacking") ? MECHANICS_BAND_H
                 : system === "Wandadapter" ? WANDADAPTER_BAND_H
                 : system === "NoBase" ? NOBASE_BAND_H
                 : system === "Vanish-Stacking" ? VANISH_BAND_H
@@ -3727,7 +3922,16 @@
             return { topReserve, bottomReserve };
         }
 
-        function computeLayout(product, cols, rows, components) {
+        // halfRow: die Wand hat obenauf eine Reihe halber Cabinets (500x500,
+        // siehe half_top_row_setup.sql). Wichtig fuer alle uebrigen
+        // Zeichenroutinen: offsetY/drawH/cellH beziehen sich weiterhin
+        // ausschliesslich auf den Block der VOLLEN Cabinets - die halbe Reihe
+        // liegt darueber im Band [offsetY - halfCellH, offsetY]. Dadurch
+        // stimmen Mechanik-Zeichnungen (Basements unten, Stacker/Clamps an den
+        // Fugen der vollen Reihen) unveraendert, ohne dass jede einzelne
+        // Routine die halbe Reihe kennen muss - sie traegt ja auch keine
+        // Mechanik.
+        function computeLayout(product, cols, rows, components, halfRow) {
             const { width: stageW, height: stageH } = resizeCanvasToStage();
             const padding = 48;
             const system = components ? components.system : null;
@@ -3735,26 +3939,32 @@
             const availableW = stageW - padding * 2;
             const availableH = stageH - padding * 2 - bottomReserve - topReserve;
 
+            const halfHeightMm = halfRow ? (product.half_height_mm || product.height_mm / 2) : 0;
             const wallWidthMm = product.width_mm * cols;
-            const wallHeightMm = product.height_mm * rows;
+            const wallHeightMm = product.height_mm * rows + halfHeightMm;
             const wallAspect = wallWidthMm / wallHeightMm;
             const availableAspect = availableW / availableH;
 
-            let drawW, drawH;
+            let drawW, totalDrawH;
             if (wallAspect > availableAspect) {
                 drawW = availableW;
-                drawH = drawW / wallAspect;
+                totalDrawH = drawW / wallAspect;
             } else {
-                drawH = availableH;
-                drawW = drawH * wallAspect;
+                totalDrawH = availableH;
+                drawW = totalDrawH * wallAspect;
             }
 
+            const cellH = (totalDrawH * product.height_mm) / wallHeightMm;
+            const halfCellH = totalDrawH - cellH * rows;
+            // drawH = nur der Block der vollen Cabinets, offsetY dessen
+            // Oberkante - die halbe Reihe sitzt darueber.
+            const drawH = cellH * rows;
             const offsetX = (stageW - drawW) / 2;
-            const offsetY = topReserve + (stageH - topReserve - bottomReserve - drawH) / 2;
+            const wallTopY = topReserve + (stageH - topReserve - bottomReserve - totalDrawH) / 2;
+            const offsetY = wallTopY + halfCellH;
             const cellW = drawW / cols;
-            const cellH = drawH / rows;
 
-            return { stageW, stageH, offsetX, offsetY, drawW, drawH, cellW, cellH };
+            return { stageW, stageH, offsetX, offsetY, drawW, drawH, cellW, cellH, halfCellH };
         }
 
         function isCurvingActiveFor(components) {
@@ -4104,6 +4314,48 @@
             return blockGroups.concat(restGroups);
         }
 
+        // Halbe oberste Reihe (500x500 auf einem 1000er-Panel): optisch klar
+        // als halbe Zellen erkennbar, in derselben Farbgebung wie die vollen
+        // Cabinets. Sie traegt keine Mechanik (kein Stacker, keine Clamp,
+        // siehe server.py) - deshalb wird hier bewusst nur das Raster
+        // gezeichnet.
+        function drawHalfTopRow(layout, cols, rows, halfRow) {
+            if (!halfRow) return;
+            const { offsetX, offsetY, cellW, halfCellH } = layout;
+            const y = offsetY - halfCellH;
+
+            for (let col = 0; col < cols; col++) {
+                const x = offsetX + col * cellW;
+                ctx.fillStyle = "#1d222b";
+                ctx.fillRect(x, y, cellW, halfCellH);
+                ctx.strokeStyle = "#3b82f6";
+                ctx.lineWidth = 1.5;
+                ctx.strokeRect(x + 0.75, y + 0.75, cellW - 1.5, halfCellH - 1.5);
+
+                if (cellW > 46 && halfCellH > 18) {
+                    ctx.fillStyle = "#8b93a3";
+                    ctx.font = "10px 'Segoe UI', Arial, sans-serif";
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+                    ctx.fillText("½", x + cellW / 2, y + halfCellH / 2);
+                }
+            }
+        }
+
+        // Zeilenindex -> Mittelpunkt. Mit halber oberster Reihe ist Zeile 0
+        // das halbe Cabinet (ganz oben), die vollen Reihen verschieben sich um
+        // eins nach unten - so bleibt der Kabelplan luecken- und
+        // ueberlappungsfrei ueber die gesamte Wand.
+        function cabinetCenterWithHalf(layout, col, row, halfRow) {
+            if (!halfRow) return cabinetCenter(layout, col, row);
+            const { offsetX, offsetY, cellW, cellH, halfCellH } = layout;
+            const x = offsetX + col * cellW + cellW / 2;
+            const y = row === 0
+                ? offsetY - halfCellH / 2
+                : offsetY + (row - 1) * cellH + cellH / 2;
+            return { x, y };
+        }
+
         function cabinetCenter(layout, col, row) {
             // Curving veraendert keine Cabinet-Positionen (reine 2D-Bogen-
             // Illusion an den Aussenkanten, siehe drawCurvingCabinetCells) -
@@ -4155,14 +4407,14 @@
         // Port 3), damit der Kabelplan die Lastverteilung ueber mehrere
         // Controller hinweg korrekt und eindeutig darstellt statt einer
         // controllerunabhaengigen Durchnummerierung.
-        function drawWiringLayer(layout, cols, rows, info, color, labelPrefix, laneDx, laneDy, direction) {
+        function drawWiringLayer(layout, cols, rows, info, color, labelPrefix, laneDx, laneDy, direction, halfRow) {
             if (!info || info.incomplete) return;
             const { maxPerGroup, portsPerController } = info;
             const groups = buildWiringGroups(cols, rows, maxPerGroup, direction);
 
             groups.forEach((group, groupIndex) => {
                 const points = group.map(({ col, row }) => {
-                    const c = cabinetCenter(layout, col, row);
+                    const c = cabinetCenterWithHalf(layout, col, row, halfRow);
                     return { x: c.x + laneDx, y: c.y + laneDy };
                 });
 
@@ -4199,8 +4451,17 @@
             });
         }
 
-        function drawWiring(layout, cols, rows, wiring) {
+        // Die halbe oberste Reihe ist verkabelungstechnisch eine ganz normale
+        // Cabinet-Reihe - sie braucht Strom und Daten wie jedes andere
+        // Cabinet. Deshalb wird sie hier als zusaetzliche Reihe mitgezaehlt
+        // (Zeile 0, siehe cabinetCenterWithHalf). Dass ein halbes Cabinet
+        // weniger Watt und weniger Pixel hat, bleibt dabei unberuecksichtigt -
+        // die Kapazitaetsrechnung behandelt es wie ein volles und liegt damit
+        // bewusst auf der sicheren Seite (eher ein Strang zu viel als zu
+        // wenig).
+        function drawWiring(layout, cols, rows, wiring, halfRow) {
             if (!wiring || !wiring.active) return;
+            const wiringRows = rows + (halfRow ? 1 : 0);
 
             const notices = [];
             if (wiring.network && wiring.network.incomplete) {
@@ -4211,13 +4472,13 @@
             }
             if (notices.length > 0) drawWiringNotices(layout, notices);
 
-            drawWiringLayer(layout, cols, rows, wiring.network, WIRING_NETWORK_COLOR, "N", -WIRING_LANE_OFFSET, -WIRING_LANE_OFFSET, wiring.direction);
-            drawWiringLayer(layout, cols, rows, wiring.power, WIRING_POWER_COLOR, "S", WIRING_LANE_OFFSET, WIRING_LANE_OFFSET, wiring.direction);
+            drawWiringLayer(layout, cols, wiringRows, wiring.network, WIRING_NETWORK_COLOR, "N", -WIRING_LANE_OFFSET, -WIRING_LANE_OFFSET, wiring.direction, halfRow);
+            drawWiringLayer(layout, cols, wiringRows, wiring.power, WIRING_POWER_COLOR, "S", WIRING_LANE_OFFSET, WIRING_LANE_OFFSET, wiring.direction, halfRow);
         }
 
-        function drawCabinetGrid(product, cols, rows, components, wiring) {
-            const layout = computeLayout(product, cols, rows, components);
-            const { stageW, stageH, offsetX, offsetY, drawW, drawH } = layout;
+        function drawCabinetGrid(product, cols, rows, components, wiring, halfRow) {
+            const layout = computeLayout(product, cols, rows, components, halfRow);
+            const { stageW, stageH, offsetX, offsetY, drawW, drawH, halfCellH } = layout;
             ctx.clearRect(0, 0, stageW, stageH);
 
             // Curving (Concave/Convex): reine 2D-Bogen-Illusion, siehe
@@ -4238,25 +4499,27 @@
                     }
                 }
                 drawCabinetCellFrames(layout, cols, rows);
+                drawHalfTopRow(layout, cols, rows, halfRow);
 
-                // Außenrahmen der Gesamtwand
+                // Außenrahmen der Gesamtwand - schliesst die halbe Reihe mit
+                // ein, sonst saehe sie wie ein separates Bauteil aus.
                 ctx.strokeStyle = "#e6e9ef";
                 ctx.lineWidth = 2;
-                ctx.strokeRect(offsetX, offsetY, drawW, drawH);
+                ctx.strokeRect(offsetX, offsetY - (halfRow ? halfCellH : 0), drawW, drawH + (halfRow ? halfCellH : 0));
             }
 
             renderMechanics(layout, cols, rows, components);
 
             // Kabelplan liegt ueber Mechanik/Grid, damit die Straenge immer
             // sichtbar bleiben.
-            drawWiring(layout, cols, rows, wiring);
+            drawWiring(layout, cols, rows, wiring, halfRow);
         }
 
-        function render(product, cols, rows, components, wiring) {
-            currentState = { product, cols, rows, components, wiring };
+        function render(product, cols, rows, components, wiring, halfRow) {
+            currentState = { product, cols, rows, components, wiring, halfRow };
             stageEmptyEl.style.display = "none";
             canvas.style.display = "block";
-            drawCabinetGrid(product, cols, rows, components, wiring);
+            drawCabinetGrid(product, cols, rows, components, wiring, halfRow);
         }
 
         function clear() {
@@ -4269,7 +4532,7 @@
 
         function rerenderCurrent() {
             if (currentState) {
-                drawCabinetGrid(currentState.product, currentState.cols, currentState.rows, currentState.components, currentState.wiring);
+                drawCabinetGrid(currentState.product, currentState.cols, currentState.rows, currentState.components, currentState.wiring, currentState.halfRow);
             }
         }
 
@@ -4286,9 +4549,9 @@
         // was vor dem Export sichtbar war.
         const EXPORT_SCALE_DEFAULT = 3;
 
-        function renderToDataUrl(product, cols, rows, components, wiring, scale) {
+        function renderToDataUrl(product, cols, rows, components, wiring, scale, halfRow) {
             exportScaleOverride = scale || EXPORT_SCALE_DEFAULT;
-            drawCabinetGrid(product, cols, rows, components, wiring);
+            drawCabinetGrid(product, cols, rows, components, wiring, halfRow);
             const dataUrl = canvas.toDataURL("image/png");
             exportScaleOverride = null;
             resizeCanvasToStage();
@@ -4296,7 +4559,18 @@
             return dataUrl;
         }
 
-        return { render, clear, renderToDataUrl };
+        // Anzahl der Straenge (= Stromkreise bzw. Netzwerk-Ports), in die das
+        // Raster zerfaellt - exakt dieselbe Zerlegung, die drawWiringLayer
+        // zeichnet. Wird ausserhalb fuer das Zuleitungsgewicht gebraucht
+        // (siehe getPowerFeedCount), damit Gewicht und Kabelplan nie
+        // auseinanderlaufen: ceil(Cabinets / Kapazitaet) waere zu wenig, weil
+        // eine Zeile/Spalte nur komplett in einen Strang aufgenommen wird.
+        function countWiringGroups(cols, rows, maxPerGroup, direction) {
+            if (!maxPerGroup || maxPerGroup < 1 || cols < 1 || rows < 1) return 0;
+            return buildWiringGroups(cols, rows, maxPerGroup, direction).length;
+        }
+
+        return { render, clear, renderToDataUrl, countWiringGroups };
     })();
 
     // ------------------------------------------------------------------
@@ -4741,16 +5015,20 @@
     // article_catalog_mock.
     //
     // Die Empfangskarte ist eine Eigenschaft des Panels, nicht der Montage -
-    // die Regeln gelten deshalb in BEIDEN Einsatzarten (Ruecksprache: "fuer
-    // temporaer + fix"). Panels ohne eigenen Eintrag bekommen die A10s Pro /
-    // A8s Pro (DEFAULT_COMPAT, Ruecksprache: "Rest A10s Pro"); nur die
-    // Panels in NO_CARD_COMPAT_PRODUCTS bleiben unrestriktiert, weil fuer
-    // sie noch keine Karte festgelegt ist.
+    // die KARTEN-Regeln gelten deshalb in BEIDEN Einsatzarten (Ruecksprache:
+    // "fuer temporaer + fix"). Panels ohne eigenen Eintrag bekommen die
+    // A10s Pro / A8s Pro (DEFAULT_COMPAT, Ruecksprache: "Rest A10s Pro").
+    //
+    // Die BRANDS-Listen gelten dagegen nur beim temporaeren Aufbau
+    // (Ruecksprache: Black Marble + Vanish nur Evision/Colorlight,
+    // Venus/Jupiter nur Brompton, Rest nur Novastar). Bei Festinstallation
+    // sollen immer alle drei Hersteller waehlbar sein - siehe
+    // populateBrands(), das compat.brands dort bewusst ignoriert.
     //
     // AURA/AURA FLEX: nur mit XA50 Pro (5G-Empfangskarte) bestueckbar
     // -> nur Novastar-Controller, die eine 5G-Karte verarbeiten koennen.
     const XA50_PRO_ONLY_COMPAT = {
-        brands: ["novastar", "colorlight"],
+        brands: ["novastar"],
         models: { novastar: ["cx40", "mx2000", "mx6000"] },
         cards: { cx40: ["xa50_pro"], mx2000: ["xa50_pro"], mx6000: ["xa50_pro"] }
     };
@@ -4758,13 +5036,13 @@
     // statt der XA50 Pro (beides 5G-Empfangskarten derselben Kapazitaets-
     // klasse, siehe CONTROLLER_DB).
     const CA50E_ONLY_COMPAT = {
-        brands: ["novastar", "colorlight"],
+        brands: ["novastar"],
         models: { novastar: ["cx40", "mx2000", "mx6000"] },
         cards: { cx40: ["ca50e"], mx2000: ["ca50e"], mx6000: ["ca50e"] }
     };
     // VENUS/JUPITER: nur Brompton Tessera, nur mit der R2-Empfangskarte.
     const R2_ONLY_COMPAT = {
-        brands: ["brompton-tessera", "colorlight"],
+        brands: ["brompton-tessera"],
         models: { "brompton-tessera": ["sx40", "s8"] },
         cards: { sx40: ["r2"], s8: ["r2"] }
     };
@@ -4794,8 +5072,19 @@
     // laut CONTROLLER_DB nur bei MX40/MX30/MX20, nicht bei CX40/MX2000/
     // MX6000 (reine 5G-Karten dort).
     const A10S_PRO_ONLY_COMPAT = {
-        brands: ["novastar", "colorlight"],
-        models: { novastar: ["mx40", "mx30", "mx20"] },
+        brands: ["novastar"],
+        // Kein models-Eintrag fuer novastar = KEINE Modell-Einschraenkung
+        // (siehe populateModels): Ruecksprache "bei allen Novastar Produkten
+        // bis auf Aura, Aura Flex und Enki koennen alle Controller benutzt
+        // werden, als auch KU20, die MCTRL-Reihe und MX2000/6000". Bewusst
+        // weggelassen statt alle Keys aufzuzaehlen, damit spaeter ergaenzte
+        // Modelle automatisch mit dabei sind.
+        models: {},
+        // Die Karte bleibt trotzdem vorgegeben - aber nur bei den Modellen,
+        // die sie ueberhaupt fuehren. MX40/MX30/MX20 sind laut CONTROLLER_DB
+        // die einzigen mit A10s Pro / A8s Pro; KU20, MCTRL-Reihe, CX40 und
+        // MX2000/6000 haben kein Karten-Limit und behalten ihr eigenes
+        // Angebot (siehe populateReceivingCards).
         cards: { mx40: ["a10s_a8s_pro"], mx30: ["a10s_a8s_pro"], mx20: ["a10s_a8s_pro"] }
     };
     // AR 10.41: nur Novastar MCTRL-Controller, keine Armor Series.
@@ -4813,9 +5102,19 @@
     // Armor Series (Ruecksprache) - diese Karte gibt es laut CONTROLLER_DB
     // nur bei MX40/MX30/MX20.
     const ARMOR_ONLY_COMPAT = {
-        brands: ["novastar", "colorlight"],
-        models: { novastar: ["mx40", "mx30", "mx20"] },
+        brands: ["novastar"],
+        // Wie bei A10S_PRO_ONLY_COMPAT: keine Modell-Einschraenkung, die
+        // Armor Series wird nur dort erzwungen, wo es sie gibt (MX40/30/20).
+        models: {},
         cards: { mx40: ["armor"], mx30: ["armor"], mx20: ["armor"] }
+    };
+    // VANISH V8T: Empfangskarte laut Ruecksprache "noch keine" - deshalb
+    // KEINE Karten-/Modell-Einschraenkung (leere cards/models), aber beim
+    // temporaeren Aufbau wie Black Marble nur Evision/Colorlight.
+    const VANISH_COMPAT = {
+        brands: ["colorlight"],
+        models: {},
+        cards: {}
     };
     const PRODUCT_CONTROLLER_COMPAT = {
         "LANG-003": XA50_PRO_ONLY_COMPAT, // AURA
@@ -4828,17 +5127,16 @@
         "LANG-001": ARMOR_ONLY_COMPAT,    // AR3.91 Plus LE
         "LANG-020": ARMOR_ONLY_COMPAT,    // Avora Root
         "LANG-008": ARMOR_ONLY_COMPAT,    // LUGH
+        // Halbe Cabinets (500x500) - Empfangskarte haengt am Panel-Typ, nicht
+        // an der Bauhoehe: dieselbe Regel wie die 1000er-Variante. Avora
+        // 500x500 (LANG-022) braucht wie Avora selbst keinen Eintrag und
+        // faellt auf DEFAULT_COMPAT.
+        "LANG-021": ARMOR_ONLY_COMPAT,    // AR3.91 Plus LE 500x500
+        "LANG-023": ARMOR_ONLY_COMPAT,    // Avora Root 500x500
         "LANG-014": BM4_MATTE_COMPAT, // Black Marble 4 (matt)
-        "LANG-015": BM4_GLOSSY_COMPAT // Black Marble 4 (glossy)
+        "LANG-015": BM4_GLOSSY_COMPAT, // Black Marble 4 (glossy)
+        "LANG-011": VANISH_COMPAT     // Vanish V8T
     };
-    // Vanish V8T: Empfangskarte laut Ruecksprache "noch keine" - bewusst
-    // KEINE Einschraenkung, damit die komplette CONTROLLER_DB waehlbar bleibt,
-    // bis die Karte feststeht. Black Marble 4 hat dagegen bereits feste
-    // Evision-/Colorlight-Karten und darf deshalb nicht durch diese Ausnahme
-    // unbeschraenkt bleiben.
-    const NO_CARD_COMPAT_PRODUCTS = new Set([
-        "LANG-011" // Vanish V8T
-    ]);
     // Alle uebrigen Panels (kein Eintrag oben): A10s Pro / A8s Pro
     // (Ruecksprache "Rest A10s Pro").
     const DEFAULT_COMPAT = A10S_PRO_ONLY_COMPAT;
@@ -4869,6 +5167,7 @@
         // laeuft und die Controller-Auswahl dabei NICHT zurueckgesetzt werden
         // soll, solange sich das Panel selbst nicht geaendert hat.
         let currentProductKey; // undefined = noch nie gesetzt (erzwingt Erstlauf)
+        let currentUsage;      // "fest" | "temporaer" | null - steuert die Markenliste
         let currentProduct = null;
 
         // Die Empfangskarte haengt am Panel, nicht an der Einsatzart - die
@@ -4876,9 +5175,6 @@
         // Festinstallation (siehe PRODUCT_CONTROLLER_COMPAT).
         function getCompat() {
             if (!currentProduct) return null;
-            // Panels, fuer die noch keine Karte festgelegt ist, bleiben
-            // unrestriktiert (komplette CONTROLLER_DB waehlbar).
-            if (NO_CARD_COMPAT_PRODUCTS.has(currentProduct.article_number)) return null;
             // Panels ohne spezifischen Eintrag fallen auf die A10s Pro /
             // A8s Pro zurueck statt unrestriktiert zu bleiben.
             return PRODUCT_CONTROLLER_COMPAT[currentProduct.article_number] || DEFAULT_COMPAT;
@@ -4889,17 +5185,25 @@
         // von setProduct() aufgerufen, also nur bei echtem Panelwechsel.
         function populateBrands() {
             const compat = getCompat();
+            // Bei Festinstallation bleiben alle drei Hersteller waehlbar
+            // (Ruecksprache) - die panelabhaengige Markenliste greift nur
+            // beim temporaeren Aufbau. Modell-/Kartenregeln gelten weiter.
+            const restrictBrands = compat && getPreFilter().usage !== "fest";
             const options = Object.entries(CONTROLLER_DB)
-                .filter(([key]) => !compat || compat.brands.includes(key))
+                .filter(([key]) => !restrictBrands || compat.brands.includes(key))
                 .map(([key, b]) => ({ value: key, text: b.label }));
             fillSelectRequireChoice(controllerBrandSelect, options, "-- Keine Controller-Marke verfügbar --");
             populateModels();
         }
 
+        // Neuaufbau bei Panelwechsel UND bei Wechsel der Einsatzart, da die
+        // Markenliste von beidem abhaengt (siehe populateBrands).
         function setProduct(product) {
             const key = product ? product.article_number : null;
-            if (key === currentProductKey) return;
+            const usage = getPreFilter().usage;
+            if (key === currentProductKey && usage === currentUsage) return;
             currentProductKey = key;
+            currentUsage = usage;
             currentProduct = product;
             populateBrands();
         }
@@ -5276,10 +5580,152 @@
     // ------------------------------------------------------------------
     // Steuerung / Event-Handling
     // ------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // Eingabeeinheit Breite/Hoehe (Ruecksprache): Cabinets oder Meter. Die
+    // gesamte restliche Anwendung rechnet unveraendert in ganzen Cabinets -
+    // die Meter-Eingabe wird hier an genau einer Stelle (getCabinetCounts)
+    // ueber die Cabinet-Masse des gewaehlten Produkts umgerechnet. Ohne
+    // gewaehltes Produkt sind die Masse unbekannt; die Umrechnung faellt dann
+    // auf die Rohzahl zurueck, bis ein Produkt gewaehlt ist.
+    // ------------------------------------------------------------------
+    function getDimensionUnit() {
+        const checked = document.querySelector('input[name="dimension-unit"]:checked');
+        return checked ? checked.value : "cabinets";
+    }
+
+    // Meter -> Cabinets: kaufmaennisch gerundet, mindestens 1. Bewusst
+    // gerundet und nicht aufgerundet - bei 2,4 m und 1-m-Cabinets ist eine
+    // 2-Cabinet-Wand naeher an der Vorgabe als eine 3-Cabinet-Wand. Die
+    // tatsaechlich erreichte Groesse steht im Hinweis unter den Feldern.
+    function metersToCabinets(meters, cabinetSizeMm) {
+        if (!cabinetSizeMm || cabinetSizeMm <= 0 || !(meters > 0)) return 1;
+        return Math.max(1, Math.round((meters * 1000) / cabinetSizeMm));
+    }
+
+    // Hat das Produkt ein halbes Cabinet (500x500) hinterlegt, darf die
+    // Wandhoehe auf eine halbe Reihe enden: "2,5" bedeutet dann 2 volle
+    // Cabinets plus ein halbes obenauf (Ruecksprache). Ohne hinterlegtes
+    // halbes Cabinet bleibt die Hoehe wie bisher eine ganze Zahl.
+    function hasHalfCabinet(product) {
+        return !!(product && product.half_article_id);
+    }
+
+    // Zerlegt eine (evtl. gebrochene) Cabinet-Hoehe in volle Reihen + halbe
+    // Reihe. Gerundet wird auf halbe Cabinets, damit 2,4 und 2,6 beide bei
+    // 2,5 landen statt unvorhersehbar auf- oder abzuspringen.
+    function splitHeightCabinets(heightCabinets, allowHalf) {
+        if (!(heightCabinets > 0)) return { rows: 1, halfRow: 0 };
+        if (!allowHalf) {
+            return { rows: Math.max(1, Math.round(heightCabinets)), halfRow: 0 };
+        }
+        const halfUnits = Math.max(1, Math.round(heightCabinets * 2));
+        const rows = Math.floor(halfUnits / 2);
+        const halfRow = halfUnits % 2;
+        // Eine Wand aus NUR einem halben Cabinet ist kein sinnvoller Aufbau
+        // (kein Footbeam-Unterbau) - dann lieber ein volles Cabinet.
+        if (rows === 0) return { rows: 1, halfRow: 0 };
+        return { rows, halfRow };
+    }
+
+    // cols/rows sind volle Cabinets, halfRow ist 0 oder 1 zusaetzliche halbe
+    // Reihe ganz oben. Die Mechanik-Stueckliste rechnet ausschliesslich mit
+    // rows - die halbe Reihe braucht laut Ruecksprache weder Stacker noch
+    // Clamp. Fuer Stueckzahl, Gewicht, Leistung, Aufloesung und Kabelplan
+    // zaehlt sie dagegen mit.
     function getCabinetCounts() {
+        const allowHalf = hasHalfCabinet(selectedProduct);
+        if (getDimensionUnit() === "meter" && selectedProduct) {
+            const heightCabinets = (parseFloat(heightInput.value) * 1000) / selectedProduct.height_mm;
+            return {
+                cols: metersToCabinets(parseFloat(widthInput.value), selectedProduct.width_mm),
+                ...splitHeightCabinets(heightCabinets, allowHalf)
+            };
+        }
         const cols = Math.max(1, parseInt(widthInput.value, 10) || 1);
-        const rows = Math.max(1, parseInt(heightInput.value, 10) || 1);
-        return { cols, rows };
+        return {
+            cols,
+            ...splitHeightCabinets(parseFloat(heightInput.value), allowHalf)
+        };
+    }
+
+    // Gesamtzahl Cabinets inkl. halber Reihe - die halbe Reihe ist genauso
+    // breit wie die Wand, liefert also cols zusaetzliche Cabinets.
+    function getTotalCabinetCount(cols, rows, halfRow) {
+        return cols * rows + cols * (halfRow ? 1 : 0);
+    }
+
+    // Gesamtgewicht bzw. -leistung inkl. halber Reihe: das halbe Cabinet hat
+    // eigene Datenblattwerte (siehe half_* aus /api/products), es ist NICHT
+    // einfach das halbe volle Cabinet.
+    function getCabinetTotals(product, cols, rows, halfRow) {
+        const halfCount = halfRow ? cols : 0;
+        const halfWeight = halfCount * (product.half_weight_kg || 0);
+        const halfPower = halfCount * (product.half_max_power_consumption_w || 0);
+        return {
+            cabinetCount: cols * rows + halfCount,
+            halfCount,
+            weightKg: product.weight_kg * cols * rows + halfWeight,
+            powerW: product.max_power_consumption_w * cols * rows + halfPower,
+            heightMm: product.height_mm * rows + (halfCount ? product.half_height_mm : 0)
+        };
+    }
+
+    // Stellt Labels und Eingabeschrittweite auf die gewaehlte Einheit um.
+    // convertValues=true rechnet die aktuell eingetragenen Werte mit um,
+    // damit ein Einheitenwechsel die Wandgroesse nicht veraendert.
+    function applyDimensionUnit(convertValues) {
+        const unit = getDimensionUnit();
+        const isMeter = unit === "meter";
+
+        if (convertValues && selectedProduct) {
+            const { cols, rows, halfRow } = lastCabinetCounts;
+            const totals = getCabinetTotals(selectedProduct, cols, rows, halfRow);
+            if (isMeter) {
+                widthInput.value = ((cols * selectedProduct.width_mm) / 1000).toFixed(2);
+                heightInput.value = (totals.heightMm / 1000).toFixed(2);
+            } else {
+                widthInput.value = String(cols);
+                heightInput.value = String(rows + (halfRow ? 0.5 : 0));
+            }
+        }
+
+        widthLabelEl.textContent = isMeter ? "Breite (m)" : "Cabinets (Breite)";
+        heightLabelEl.textContent = isMeter ? "Höhe (m)" : "Cabinets (Höhe)";
+        widthInput.step = isMeter ? "0.05" : "1";
+        widthInput.min = isMeter ? "0.05" : "1";
+        // Bei Produkten mit halbem Cabinet darf die Hoehe auf 0,5 enden -
+        // "2,5" heisst dann 2 volle Cabinets plus ein halbes obenauf.
+        const allowHalf = hasHalfCabinet(selectedProduct);
+        heightInput.step = isMeter ? "0.05" : (allowHalf ? "0.5" : "1");
+        heightInput.min = isMeter ? "0.05" : (allowHalf ? "0.5" : "1");
+    }
+
+    // Zeigt bei Meter-Eingabe, auf welches Cabinet-Raster gerundet wurde und
+    // welche Masse dabei tatsaechlich herauskommen - sonst waere nicht
+    // nachvollziehbar, warum aus 2,4 m eine 2,0 m breite Wand wird.
+    function renderDimensionHint(cols, rows, halfRow) {
+        if (!selectedProduct) {
+            dimensionHintEl.textContent = getDimensionUnit() === "meter"
+                ? "Bitte zuerst ein Produkt wählen – ohne Cabinet-Maße ist keine Umrechnung möglich."
+                : "";
+            return;
+        }
+        // Der Hinweis erscheint auch in der Cabinet-Eingabe, sobald eine halbe
+        // Reihe im Spiel ist - sonst waere nicht ersichtlich, dass aus "2,5"
+        // zwei volle plus ein halbes Cabinet werden.
+        if (getDimensionUnit() !== "meter" && !halfRow) {
+            dimensionHintEl.textContent = "";
+            return;
+        }
+        const totals = getCabinetTotals(selectedProduct, cols, rows, halfRow);
+        const widthM = (cols * selectedProduct.width_mm) / 1000;
+        const heightM = totals.heightMm / 1000;
+        const rasterText = halfRow
+            ? `${cols} × ${rows} volle Cabinets + ${cols} halbe (${selectedProduct.half_height_mm} mm)`
+            : `${cols} × ${rows} Cabinets`;
+        dimensionHintEl.textContent =
+            `Ergibt ${rasterText} = ${widthM.toFixed(2)} × ${heightM.toFixed(2)} m ` +
+            `(Cabinet ${selectedProduct.width_mm} × ${selectedProduct.height_mm} mm).`;
     }
 
     const DEFAULT_STAGE_MESSAGE = "Wähle ein Produkt, um das Cabinet-Raster zu zeichnen.";
@@ -5420,6 +5866,7 @@
         renderSpecs(selectedProduct);
 
         if (!selectedProduct) {
+            renderDimensionHint(0, 0);
             renderSummary(null);
             renderMechanicsTable(null);
             renderStackingSetup(null);
@@ -5435,15 +5882,20 @@
             return;
         }
 
-        const { cols, rows } = getCabinetCounts();
-        renderSummary(selectedProduct, cols, rows);
+        const { cols, rows, halfRow } = getCabinetCounts();
+        lastCabinetCounts = { cols, rows, halfRow };
+        renderDimensionHint(cols, rows, halfRow);
+        renderSummary(selectedProduct, cols, rows, MECHANICS_PENDING, halfRow);
 
         // Race-Schutz: verwirft veraltete Antworten, falls der Nutzer
         // Breite/Höhe/Produkt/Montage-Modus schnell hintereinander ändert.
         const token = ++updateToken;
         const systemName = getSelectedSystemName();
+        // rows = nur die vollen Reihen: die halbe oberste Reihe traegt keine
+        // Mechanik und geht deshalb nicht in die Stueckliste ein. Fuer die
+        // Statik-Hoehengrenze zaehlt sie aber mit, dafuer half_top_row.
         const result = systemName
-            ? await fetchMechanics(selectedProduct.product_id, cols, rows, systemName, personContactInput.checked)
+            ? await fetchMechanics(selectedProduct.product_id, cols, rows, systemName, personContactInput.checked, halfRow)
             : null;
         if (token !== updateToken) return;
 
@@ -5451,17 +5903,17 @@
         // den gesamten Aufbau statt nur die Stückliste zu leeren, damit dort
         // keine veralteten/fehlerhaften Werte stehen bleiben.
         if (result && result.error) {
-            renderSummary(selectedProduct, cols, rows, result);
+            renderSummary(selectedProduct, cols, rows, result, halfRow);
             renderMechanicsTable(result);
             renderStackingSetup(null);
             renderValidationNote(null);
             renderBallastCard(null);
             stageEmptyEl.textContent = result.error;
             Visualizer.clear();
-            ControllerModule.render(selectedProduct, cols, rows);
+            ControllerModule.render(selectedProduct, cols, rows + (halfRow ? 1 : 0));
             renderFiberAccessories();
             renderControllerLineItem(true);
-            renderSpareParts(selectedProduct, cols, rows);
+            renderSpareParts(selectedProduct, cols, rows + (halfRow ? 1 : 0));
             lastMechanicsResult = result;
             return;
         }
@@ -5474,16 +5926,19 @@
         }
 
         stageEmptyEl.textContent = DEFAULT_STAGE_MESSAGE;
-        renderSummary(selectedProduct, cols, rows, result);
+        renderSummary(selectedProduct, cols, rows, result, halfRow);
         renderMechanicsTable(result);
         renderStackingSetup(result);
         renderValidationNote(result);
         renderBallastCard(result);
-        Visualizer.render(selectedProduct, cols, rows, result, buildWiringOptions(cols, rows));
-        ControllerModule.render(selectedProduct, cols, rows);
+        // Controller/Spare Parts zaehlen Cabinets, nicht Mechanik - die halbe
+        // Reihe zaehlt dort als vollwertige Reihe mit (siehe drawWiring).
+        const wiringRows = rows + (halfRow ? 1 : 0);
+        Visualizer.render(selectedProduct, cols, rows, result, buildWiringOptions(cols, wiringRows), halfRow);
+        ControllerModule.render(selectedProduct, cols, wiringRows);
         renderFiberAccessories();
         renderControllerLineItem(true);
-        renderSpareParts(selectedProduct, cols, rows);
+        renderSpareParts(selectedProduct, cols, wiringRows);
         lastMechanicsResult = result;
     }
 
@@ -5501,26 +5956,29 @@
     // Export fuer die jeweils aktive Wand verwendet, damit beide immer
     // exakt denselben Daten-/Bild-Stand einfrieren.
     function buildWallSnapshot(title) {
-        const { cols, rows } = getCabinetCounts();
+        const { cols, rows, halfRow } = getCabinetCounts();
         const systemName = getSelectedSystemName();
         const result = lastMechanicsResult;
         const hasStaticError = !!(result && result.error);
         const componentsForViz = hasStaticError ? null : result;
+        // Fuer alles, was Cabinets zaehlt (Kabelplan, Controller, Spare
+        // Parts), zaehlt die halbe oberste Reihe als volle Reihe mit.
+        const wiringRows = rows + (halfRow ? 1 : 0);
 
-        const wallImage = Visualizer.renderToDataUrl(selectedProduct, cols, rows, componentsForViz, null);
-        const cablingImage = Visualizer.renderToDataUrl(selectedProduct, cols, rows, null, buildWiringOptions(cols, rows, true));
+        const wallImage = Visualizer.renderToDataUrl(selectedProduct, cols, rows, componentsForViz, null, undefined, halfRow);
+        const cablingImage = Visualizer.renderToDataUrl(selectedProduct, cols, rows, null, buildWiringOptions(cols, wiringRows, true), undefined, halfRow);
 
         const controllerSnapshot = ControllerModule.getSnapshot();
-        const networkInfo = ControllerModule.getWiringInfo(selectedProduct, cols, rows);
+        const networkInfo = ControllerModule.getWiringInfo(selectedProduct, cols, wiringRows);
         const maxCabinetsPerCircuit = getMaxCabinetsPerCircuit(selectedProduct);
         const fiberAccessories = getActiveFiberAccessories();
         // hasProduct hier immer true - buildWallSnapshot wird ausschliesslich
         // fuer eine bereits konfigurierte Wand aufgerufen (Add Wall/PDF-Export).
         const processingLineItems = getProcessingLineItems(controllerSnapshot, true);
-        const spareLineItems = getSpareLineItems(selectedProduct, cols * rows, controllerSnapshot);
+        const spareLineItems = getSpareLineItems(selectedProduct, cols * wiringRows, controllerSnapshot);
 
         return {
-            title, product: selectedProduct, cols, rows, systemName, result,
+            title, product: selectedProduct, cols, rows, halfRow, systemName, result,
             controllerSnapshot, fiberAccessories, processingLineItems, spareLineItems,
             networkInfo, maxCabinetsPerCircuit, wallImage, cablingImage
         };
@@ -5533,6 +5991,13 @@
     // beim manuellen Zuruecksetzen auf die Platzhalter-Option, statt sie
     // hier ein zweites Mal nachzubauen.
     function resetActiveWallConfig() {
+        // Zuruecksetzen bedeutet auch: zurueck auf die Cabinet-Eingabe. Ein
+        // "1" in einem Meter-Feld waere sonst eine ganz andere Wand als das
+        // gemeinte 1x1-Cabinet-Raster.
+        const cabinetsRadio = document.querySelector('input[name="dimension-unit"][value="cabinets"]');
+        if (cabinetsRadio) cabinetsRadio.checked = true;
+        applyDimensionUnit(false);
+        lastCabinetCounts = { cols: 1, rows: 1 };
         widthInput.value = "1";
         heightInput.value = "1";
         personContactInput.checked = false;
@@ -5824,6 +6289,14 @@
     });
     widthInput.addEventListener("input", update);
     heightInput.addEventListener("input", update);
+    // Einheitenwechsel rechnet die eingetragenen Werte mit um, damit die Wand
+    // dieselbe Groesse behaelt (2 Cabinets à 1 m <-> 2,00 m).
+    document.querySelectorAll('input[name="dimension-unit"]').forEach(radio => {
+        radio.addEventListener("change", () => {
+            applyDimensionUnit(true);
+            update();
+        });
+    });
     personContactInput.addEventListener("change", update);
     fiberOpticInput.addEventListener("change", update);
     backupInput.addEventListener("change", update);
@@ -5905,12 +6378,13 @@
         return `<table class="pdf-table"><tbody>${rowsHtml}</tbody></table>`;
     }
 
-    function buildOverviewHtml(product, cols, rows, systemName, mechanicsResult) {
+    function buildOverviewHtml(product, cols, rows, systemName, mechanicsResult, halfRow = 0) {
+        const totals = getCabinetTotals(product, cols, rows, halfRow);
         const totalWidthMm = product.width_mm * cols;
-        const totalHeightMm = product.height_mm * rows;
-        const totalWeightKg = product.weight_kg * cols * rows;
-        const totalPowerW = product.max_power_consumption_w * cols * rows;
-        const cabinetCount = cols * rows;
+        const totalHeightMm = totals.heightMm;
+        const totalWeightKg = totals.weightKg;
+        const totalPowerW = totals.powerW;
+        const cabinetCount = totals.cabinetCount;
         const { location, usage } = getPreFilter();
         const locationText = location === "indoor" ? "Indoor" : location === "outdoor" ? "Outdoor" : "–";
         const usageText = usage === "fest" ? "Festinstallation" : usage === "temporaer" ? "Temporärer Einsatz" : "–";
@@ -5920,7 +6394,7 @@
         // getWallWeightBreakdown), "Gesamtgewicht der Wand" = Cabinets +
         // dieses Mechanik-Gewicht - PDF und Bildschirm nutzen dieselbe
         // Berechnung, damit beide nie auseinanderlaufen.
-        const weightBreakdown = getWallWeightBreakdown(totalWeightKg, mechanicsResult, product);
+        const weightBreakdown = getWallWeightBreakdown(totalWeightKg, mechanicsResult, product, cols, rows, halfRow);
 
         const rows_ = [
             ["Produkt", `${product.product_name} (Art.-Nr. ${product.article_number})`],
@@ -5928,7 +6402,9 @@
             ["Cabinet-Maße (B × H)", `${product.width_mm} × ${product.height_mm} mm`],
             ["Einsatzort / Art des Einsatzes", `${locationText} / ${usageText}`],
             ["Montageart", systemLabel],
-            ["Wandraster (B × H)", `${cols} × ${rows} Cabinets (${cabinetCount} Panels)`],
+            ["Wandraster (B × H)", halfRow
+                ? `${cols} × ${rows} volle + ${cols} halbe Cabinets (${cabinetCount} Panels)`
+                : `${cols} × ${rows} Cabinets (${cabinetCount} Panels)`],
             ["Wandabmessungen", `${(totalWidthMm / 1000).toFixed(2)} × ${(totalHeightMm / 1000).toFixed(2)} m`],
             ["Gesamtgewicht", `${totalWeightKg.toFixed(1)} kg`],
             ["Gewicht Zubehör", weightBreakdown.accessoryText],
@@ -5936,7 +6412,33 @@
             ["Gesamtleistungsaufnahme", `${(totalPowerW / 1000).toFixed(2)} kW`]
         ];
 
-        return keyValueTableHtml(rows_) + (weightBreakdown.note ? `<p class="pdf-note">${weightBreakdown.note}</p>` : "");
+        // Durchschnittsleistung nur, wenn fuer das Produkt hinterlegt (siehe
+        // ar_avora_500x500_values.sql). Ausgelegt wird weiterhin nach dem
+        // Maximalwert - die Zeile ist ausdruecklich als Zusatzangabe
+        // beschriftet, damit sie nicht mit der Auslegungsleistung verwechselt
+        // wird.
+        // Die halbe oberste Reihe ist ein eigener Artikel und gehoert
+        // deshalb ausdruecklich in die Berichtsuebersicht.
+        if (halfRow) {
+            rows_.push(["Oberste Reihe (halbe Cabinets)",
+                `${cols} × ${product.half_article_name} (Art.-Nr. ${product.half_article_number}) ` +
+                `– ohne Stacker und Clamp`]);
+        }
+
+        if (product.avg_power_consumption_w) {
+            rows_.push(["Leistungsaufnahme Ø (nachrichtlich)",
+                `${((product.avg_power_consumption_w * cabinetCount) / 1000).toFixed(2)} kW ` +
+                `(${product.avg_power_consumption_w} W je Cabinet)`]);
+        }
+
+        // Produktbemerkung (z.B. "Werte sind eine Schaetzung") gehoert in den
+        // Bericht, sonst wirken die Zahlen belastbarer als sie sind.
+        const productNote = product.note
+            ? `<p class="pdf-warning">Hinweis zum Produkt: ${product.note}</p>`
+            : "";
+
+        return keyValueTableHtml(rows_) + productNote
+            + (weightBreakdown.note ? `<p class="pdf-note">${weightBreakdown.note}</p>` : "");
     }
 
     function buildControllerHtml(snapshot) {
@@ -6080,7 +6582,7 @@
     // konfigurierte Wand als auch jede per "Add Wall" gespeicherte Wand im
     // PDF-Export, damit beide exakt denselben Bericht-Aufbau bekommen.
     function buildWallReportHtml(wall) {
-        const { product, cols, rows, systemName, result, controllerSnapshot, fiberAccessories, processingLineItems, spareLineItems, networkInfo, maxCabinetsPerCircuit, wallImage, cablingImage } = wall;
+        const { product, cols, rows, halfRow, systemName, result, controllerSnapshot, fiberAccessories, processingLineItems, spareLineItems, networkInfo, maxCabinetsPerCircuit, wallImage, cablingImage } = wall;
         const hasStaticError = !!(result && result.error);
 
         let mainHtml, accessoryHtml, headingSuffix = "";
@@ -6100,7 +6602,7 @@
         return `
             <div class="pdf-section">
                 <h2>Projekt- und Systemübersicht</h2>
-                ${buildOverviewHtml(product, cols, rows, systemName, result)}
+                ${buildOverviewHtml(product, cols, rows, systemName, result, halfRow)}
             </div>
 
             <div class="pdf-two-col">
@@ -6177,7 +6679,7 @@
         pdfReportEl.innerHTML = `
             <div class="pdf-header">
                 <div>
-                    <div class="pdf-logo-plate"><img src="{{ url_for('static', filename='logo.png') }}" alt="LANG AG" class="pdf-logo"></div>
+                    <div class="pdf-logo-plate"><img src="/static/logo.png" alt="LANG AG" class="pdf-logo"></div>
                     <h1>LED-Wand Konfigurationsbericht</h1>
                 </div>
                 <div class="pdf-meta">

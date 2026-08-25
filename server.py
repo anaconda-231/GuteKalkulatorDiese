@@ -2,7 +2,6 @@ from flask import Flask, jsonify, render_template, request
 import math
 import os
 import sqlite3
-from jinja2 import FileSystemLoader
 
 from liam_truss import calculate_liam_truss_mechanics
 
@@ -56,9 +55,26 @@ def get_products():
             ac.width_mm,
             ac.height_mm,
             ac.weight_kg,
-            ac.max_power_consumption_w
+            ac.max_power_consumption_w,
+            -- Durchschnittsleistung und Produktbemerkung sind nur bei
+            -- einzelnen Produkten hinterlegt (siehe
+            -- ar_avora_500x500_values.sql) und sonst NULL - das Frontend
+            -- blendet die Zeilen dann aus.
+            ac.avg_power_consumption_w,
+            ac.note,
+            -- Halbes Cabinet (500x500) fuer eine gemischte Wandhoehe wie
+            -- 2,5 m = 2 volle + 1 halbes Cabinet. NULL, wenn das Produkt kein
+            -- halbes Gegenstueck hat - dann bleibt die Hoehe eine ganze
+            -- Cabinet-Anzahl. Siehe half_top_row_setup.sql.
+            half.id AS half_article_id,
+            half.name AS half_article_name,
+            half.article_number AS half_article_number,
+            half.height_mm AS half_height_mm,
+            half.weight_kg AS half_weight_kg,
+            half.max_power_consumption_w AS half_max_power_consumption_w
         FROM configurator_product cp
         JOIN article_catalog_mock ac ON cp.product_article_id = ac.id
+        LEFT JOIN article_catalog_mock half ON half.id = ac.half_cabinet_article_id
         WHERE 1=1
     """
     # Jede Bedingung filtert nur auf ihrer eigenen Spalte. Ein "Allrounder"-
@@ -147,10 +163,27 @@ def get_product_models():
             ac.width_mm,
             ac.height_mm,
             ac.weight_kg,
-            ac.max_power_consumption_w
+            ac.max_power_consumption_w,
+            -- Durchschnittsleistung und Produktbemerkung sind nur bei
+            -- einzelnen Produkten hinterlegt (siehe
+            -- ar_avora_500x500_values.sql) und sonst NULL - das Frontend
+            -- blendet die Zeilen dann aus.
+            ac.avg_power_consumption_w,
+            ac.note,
+            -- Halbes Cabinet (500x500) fuer eine gemischte Wandhoehe wie
+            -- 2,5 m = 2 volle + 1 halbes Cabinet. NULL, wenn das Produkt kein
+            -- halbes Gegenstueck hat - dann bleibt die Hoehe eine ganze
+            -- Cabinet-Anzahl. Siehe half_top_row_setup.sql.
+            half.id AS half_article_id,
+            half.name AS half_article_name,
+            half.article_number AS half_article_number,
+            half.height_mm AS half_height_mm,
+            half.weight_kg AS half_weight_kg,
+            half.max_power_consumption_w AS half_max_power_consumption_w
         FROM configurator_product cp
         JOIN configurator_product_article cpa ON cpa.configurator_product_id = cp.id
         JOIN article_catalog_mock ac ON ac.id = cpa.article_catalog_mock_id
+        LEFT JOIN article_catalog_mock half ON half.id = ac.half_cabinet_article_id
         WHERE cp.id = ?
     """
     params = [product_id]
@@ -284,6 +317,14 @@ MAX_STACKING_HEIGHT_BY_PRODUCT = {
     # statisch darf Flex deshalb exakt so hoch gebaut werden wie normales
     # AURA, identischer Grenzwert.
     16: 12,  # AURA FLEX
+    # Halbe Cabinets (500x500) von AR3.9/Avora/Avora Root: der Grenzwert der
+    # 1000er-Variante ist eine BAUHOEHE, keine Stueckzahl - bei halber
+    # Cabinet-Hoehe passen deshalb doppelt so viele Cabinets in dieselbe
+    # zulaessige Hoehe (AR3.91/Avora Root 6 Cabinets = 6 m -> 12 halbe,
+    # Avora ebenso). Siehe ar_avora_500x500_setup.sql.
+    79: 12,  # AR3.91 Plus LE 500x500
+    80: 12,  # Avora 500x500
+    81: 12,  # Avora Root 500x500
 }
 STACKING_HEIGHT_LIMIT_ERROR = (
     "Dieser Aufbau ist bei dieser Wandhöhe nicht umsetzbar. "
@@ -295,7 +336,27 @@ STACKING_HEIGHT_LIMIT_ERROR = (
 # Segmente umgestellt werden - NoBase/Wandadapter/Vanish-* bleiben ohne
 # Curving-Option. LIAM-Truss hat eine eigene, additive Curving-Erweiterung
 # (siehe liam_truss.py) und wird deshalb hier bewusst NICHT gelistet.
-CURVING_CAPABLE_SYSTEMS = {"Standard-Stacking", "AR-Stacking", "Hanging-Truss", "AR-Hanging"}
+CURVING_CAPABLE_SYSTEMS = {"Standard-Stacking", "AR-Stacking", "Hanging-Truss", "AR-Hanging", "AR-Outdoor-Stacking"}
+
+# AR3.9/Avora Root Outdoor-Stacking (Ruecksprache): eigener Baukasten mit
+# eigenen Artikelnummern (INFILED-ER-*), rechnerisch aber exakt dieselbe
+# Geometrie wie AR-Stacking - Basements 3-2-1, Footbeam 1:1 unter jeder
+# Cabinetspalte, Stacker 1 Cabinet hoch, 1 Clamp je Cabinet oben mittig
+# ("jede Spalte muss abgesichert sein"). Deshalb bewusst kein eigener
+# Rechenweg, sondern dieselbe Funktion wie AR-Stacking; unterschieden wird
+# nur ueber den Systemnamen (Stueckliste/Artikelnummern im Frontend).
+AR_OUTDOOR_STACKING_SYSTEM = "AR-Outdoor-Stacking"
+
+# Systeme, die nur bei einem bestimmten Einsatzort angeboten werden.
+SYSTEM_LOCATION_ONLY = {AR_OUTDOOR_STACKING_SYSTEM: "outdoor"}
+
+# Welche Systeme ein einsatzort-exklusives System verdraengt, sobald es
+# verfuegbar ist: AR3.9 und Avora Root bauen Outdoor ausschliesslich mit dem
+# ER-Baukasten, nicht wahlweise mit ihrem Indoor-Stacking (AR3.91 -> AR-
+# Stacking, Avora Root -> Standard-Stacking). Bewusst eine explizite Liste
+# statt "verdraengt alles im selben Modus": NoBase ist ein eigenstaendiges
+# Montagekonzept und bleibt Outdoor waehlbar.
+SYSTEM_REPLACED_BY = {AR_OUTDOOR_STACKING_SYSTEM: {"AR-Stacking", "Standard-Stacking"}}
 
 # Platzhalter-Gradstufen (Grad pro Fuge, Concave/Convex) - keine realen
 # Datenblattwerte vorhanden, muss durch die LANG AG bestaetigt werden. Pro
@@ -317,6 +378,12 @@ CURVING_DEGREE_STEPS_BY_PRODUCT = {
     7: [2.5, 5, 7.5, 10],   # LIAM
     19: [2.5, 5, 7.5, 10],  # Avora
     20: [2.5, 5, 7.5, 10],  # Avora Root
+    # Halbe Cabinets (500x500) - Curving ist eine horizontale Biegung, die
+    # Cabinet-Hoehe spielt dafuer keine Rolle: identische Gradstufen wie die
+    # jeweilige 1000er-Variante.
+    79: [2.5, 5, 7.5, 10],  # AR3.91 Plus LE 500x500
+    80: [2.5, 5, 7.5, 10],  # Avora 500x500
+    81: [2.5, 5, 7.5, 10],  # Avora Root 500x500
 }
 CURVING_UNSUPPORTED_ERROR = "Curving wird von diesem System nicht unterstützt."
 CURVING_ANGLE_INVALID_ERROR = "Ungültige Gradstufe für dieses Produkt."
@@ -440,8 +507,39 @@ def _calculate_ballast(product_id, height_cabinets, stacker_axis_count):
 # Personenkontakt-Faellen denselben Grenzwert wie "kein Zubehoer" und wird
 # dadurch nie als eigene Stufe erreicht (siehe Tabelle) - bewusst nicht
 # separat abgebildet.
-NEW_AR_STACKING_PRODUCT_IDS = {1, 12, 20}  # AR3.91 Plus LE, AR 10.41, Avora Root
+NEW_AR_STACKING_PRODUCT_IDS = {
+    1, 12, 20,   # AR3.91 Plus LE, AR 10.41, Avora Root
+    79, 81,      # dieselben Panels als halbes Cabinet (500x500)
+}
 NEW_AR_STACKING_INDOOR_MAX_HEIGHT = 6
+
+# Standard-Bauhoehe eines Cabinets im AR-/Avora-Baukasten. Alle Statik-
+# Schwellen dieser Familie und der Outdoor-Stacker INFILED-ER-STACK-H1 sind
+# auf dieses Mass bezogen (1 m). Seit es dieselben Panels auch als halbes
+# Cabinet gibt (500x500, siehe ar_avora_500x500_setup.sql), muessen
+# Cabinet-Stueckzahlen dafuer in Bauhoehe umgerechnet werden.
+AR_REFERENCE_CABINET_HEIGHT_MM = 1000
+
+
+def _ar_height_units(height_cabinets, cabinet_height_mm):
+    # Cabinet-Anzahl -> "1-m-Einheiten", damit die AR-Statiktabellen
+    # (Hoehengrenze, Zubehoer-Kaskade) unabhaengig von der Cabinet-Bauhoehe
+    # gelten. Bei 1000-mm-Cabinets ist das die Identitaet - das bisherige
+    # Verhalten bleibt fuer alle bestehenden Produkte exakt erhalten.
+    # Aufgerundet, damit eine angebrochene Hoeheneinheit statisch wie eine
+    # volle behandelt wird (sicherheitsgerichtet).
+    if not cabinet_height_mm or cabinet_height_mm <= 0:
+        return height_cabinets
+    return math.ceil(height_cabinets * cabinet_height_mm / AR_REFERENCE_CABINET_HEIGHT_MM)
+
+
+def _ar_stacker_span_rows(cabinet_height_mm):
+    # Der Stacker ist 1 m lang und ueberspannt damit genau 1 m Wandhoehe -
+    # bei 500er-Cabinets also zwei Reihen (Ruecksprache: "1 Stacker je 1 m
+    # Hoehe"). Mindestens 1, damit ein groesseres Cabinet nie 0 ergibt.
+    if not cabinet_height_mm or cabinet_height_mm <= 0:
+        return 1
+    return max(1, round(AR_REFERENCE_CABINET_HEIGHT_MM / cabinet_height_mm))
 NEW_AR_STACKING_HEIGHT_TIERS = {
     True: {"ohne_ausleger": 3, "k_ausleger": 5, "l_ausleger": 6},   # mit Menschenkontakt
     False: {"ohne_ausleger": 4, "k_ausleger": 5, "l_ausleger": 6},  # ohne Menschenkontakt
@@ -846,7 +944,7 @@ def _calculate_aura_flex_mechanics(width_cabinets, height_cabinets, person_conta
 #      unten), und pro Stacker nur noch 1 statt 2 Clamps.
 #   3. "Rohrschellen" heisst bei AR3.9 "Attachment" - gleiche Formel/
 #      Zaehlung, nur umbenannt.
-def _calculate_ar_stacking_mechanics(width_cabinets, height_cabinets, person_contact=False, curving_mode=None, location=None):
+def _calculate_ar_stacking_mechanics(width_cabinets, height_cabinets, person_contact=False, curving_mode=None, location=None, include_single_feet=True, cabinet_height_mm=AR_REFERENCE_CABINET_HEIGHT_MM):
     basements_3, basements_2, basements_1 = _apply_curving_width_split(width_cabinets, curving_mode)
 
     # Footbeams: 1:1 zum Cabinet-Raster (vorher beim Aura-Konzept
@@ -855,8 +953,11 @@ def _calculate_ar_stacking_mechanics(width_cabinets, height_cabinets, person_con
     # unveraendert (keine weitere Individualisierung noetig).
     footbeams = width_cabinets
 
-    # Single Foot jeweils links und rechts am Ende der Wand - unveraendert.
-    single_feet = 2
+    # Single Foot jeweils links und rechts am Ende der Wand. Im Outdoor-
+    # Baukasten (AR-Outdoor-Stacking) gibt es ihn nicht (Ruecksprache: "die
+    # Single foots muessen raus") - dort steht der Footbeam direkt auf dem
+    # Boden, deshalb include_single_feet=False.
+    single_feet = 2 if include_single_feet else 0
 
     # "Stacker = Groesse eines Cabinets" bezieht sich auf die HOEHE, nicht
     # die Grundflaeche (Ruecksprache, Korrektur): ein Stacker ueberspannt
@@ -872,8 +973,25 @@ def _calculate_ar_stacking_mechanics(width_cabinets, height_cabinets, person_con
     # (siehe oben), die Formel liefert dadurch bereits automatisch 1 Stacker +
     # 1 Clamp pro Cabinet-Spalte UND -Reihe, auch mit Curving aktiv - deshalb
     # bleibt curving_clamp bei AR3.9 immer 0 (keine separate Curving-Clamp).
-    stacker = footbeams * height_cabinets
-    clamps = stacker
+    #
+    # Halbe Cabinets (500x500): der Stacker ist ein 1-m-Bauteil und ueberspannt
+    # dort zwei Reihen (Ruecksprache: "1 Stacker je 1 m Hoehe") - deshalb
+    # floor(Hoehe / span) statt fix eine Reihe. Bei 1000er-Cabinets ist span=1
+    # und die Formel bleibt exakt die bisherige.
+    #
+    # Geht die Wandhoehe nicht restlos in der Stacker-Laenge auf (z.B. 5 halbe
+    # Cabinets = 2,5 m bei 1-m-Stackern), bleibt oben eine Reihe ohne Stacker.
+    # Dieses oberste Cabinet bekommt dann auch KEINE Clamp (Ruecksprache: "bei
+    # ungerader Hoehe keinen Stacker und keine Clamp bei dem obersten
+    # Cabinet") - es gaebe dort schlicht kein Bauteil zum Befestigen. Die
+    # Clamps zaehlen deshalb nur ueber die tatsaechlich von Stackern
+    # abgedeckten Reihen. Bei span=1 ist covered_rows == height_cabinets, das
+    # bisherige Verhalten der 1000er-Cabinets bleibt unveraendert.
+    stacker_span = _ar_stacker_span_rows(cabinet_height_mm)
+    stacker_rows = height_cabinets // stacker_span
+    covered_rows = stacker_rows * stacker_span
+    stacker = footbeams * stacker_rows
+    clamps = footbeams * covered_rows
     curving_clamp = 0
 
     components = {
@@ -889,10 +1007,14 @@ def _calculate_ar_stacking_mechanics(width_cabinets, height_cabinets, person_con
     # Neue AR3.9-Statiktabelle (Ruecksprache) NUR Indoor - Outdoor hat eine
     # eigene, noch nicht hinterlegte Statik und bleibt vorerst bei der alten
     # generischen Aura-Kaskade (siehe NEW_AR_STACKING_PRODUCT_IDS).
+    # Die Schwellen beider Kaskaden sind Bauhoehen in 1-m-Schritten, deshalb
+    # bei halben Cabinets mit der umgerechneten Hoehe arbeiten (bei
+    # 1000er-Cabinets identisch zu height_cabinets).
+    statics_height = _ar_height_units(height_cabinets, cabinet_height_mm)
     if location == "indoor":
-        accessories = _calculate_new_ar_stacking_accessories(height_cabinets, footbeams, person_contact)
+        accessories = _calculate_new_ar_stacking_accessories(statics_height, footbeams, person_contact)
     else:
-        accessories = _calculate_stacking_accessories(height_cabinets, footbeams, person_contact)
+        accessories = _calculate_stacking_accessories(statics_height, footbeams, person_contact)
     accessories["attachment"] = accessories.pop("rohrschellen")
     components.update(accessories)
     return components
@@ -1353,7 +1475,31 @@ def _get_cabinet_width_mm(conn, product_id):
     return row["width_mm"] if row else None
 
 
-def calculate_mechanics(product_id, width_cabinets, height_cabinets, system_name, person_contact=False, location=None, curving_mode=None, curving_angle_deg=None):
+# Cabinet-Hoehe wird gebraucht, seit es dasselbe Panel in zwei Bauhoehen gibt
+# (500x1000 und 500x500, siehe ar_avora_500x500_setup.sql): Statik-Grenzen und
+# die Laenge des Outdoor-Stackers sind physische Massangaben in Metern, keine
+# Cabinet-Stueckzahlen - bei halber Cabinet-Hoehe passen in dieselbe Bauhoehe
+# doppelt so viele Cabinets.
+def _get_cabinet_height_mm(conn, product_id):
+    row = conn.execute(
+        """
+        SELECT ac.height_mm
+        FROM configurator_product cp
+        JOIN article_catalog_mock ac ON cp.product_article_id = ac.id
+        WHERE cp.id = ?
+        """,
+        (product_id,),
+    ).fetchone()
+    return row["height_mm"] if row else None
+
+
+def calculate_mechanics(product_id, width_cabinets, height_cabinets, system_name, person_contact=False, location=None, curving_mode=None, curving_angle_deg=None, half_top_row=False):
+    # half_top_row: oberste Reihe ist ein halbes Cabinet (500x500 auf einem
+    # 1000er-Panel, siehe half_top_row_setup.sql). Sie braucht laut
+    # Ruecksprache weder Stacker noch Clamp und geht deshalb NICHT in die
+    # Stueckliste ein - height_cabinets zaehlt weiterhin nur die vollen
+    # Reihen. Fuer die Statik zaehlt sie aber sehr wohl mit: eine Wand aus
+    # 6 vollen + 1 halben Cabinet ist 6,5 m hoch, nicht 6 m.
     # curving_mode wird ausschliesslich fuer die vier Basement/Truss-Systeme
     # (CURVING_CAPABLE_SYSTEMS) sowie additiv fuer LIAM-Truss ausgewertet -
     # alle anderen Systeme ignorieren ihn (Wert bleibt "flat"/None, kein
@@ -1377,7 +1523,7 @@ def calculate_mechanics(product_id, width_cabinets, height_cabinets, system_name
         grid = None
         stacker_band_rows = None
         ballast = None
-        if system_name in ("Standard-Stacking", "NoBase", "AR-Stacking", "Flex-Stacking"):
+        if system_name in ("Standard-Stacking", "NoBase", "AR-Stacking", "Flex-Stacking", AR_OUTDOOR_STACKING_SYSTEM):
             # Alle vier Systeme teilen sich dieselbe Statik-Hardware-Logik
             # (Hoehen-Limit, Ausleger/Diagonale/Pipe/Rohrschellen) - AR3.9
             # (AR-Stacking) und AURA FLEX (Flex-Stacking) uebernehmen diese
@@ -1388,14 +1534,29 @@ def calculate_mechanics(product_id, width_cabinets, height_cabinets, system_name
             # Grenzwert hinterlegt), ist der Aufbau sicherheitshalber nicht
             # umsetzbar.
             max_stacking_height = MAX_STACKING_HEIGHT_BY_PRODUCT.get(product_id)
+            # Cabinet-Bauhoehe: 1000 mm im AR-/Avora-Standard, 500 mm bei den
+            # halben Cabinets. Wird sowohl fuer die Hoehengrenze als auch fuer
+            # die Stacker-Laenge gebraucht (siehe _ar_stacker_span_rows).
+            cabinet_height_mm = _get_cabinet_height_mm(conn, product_id) or AR_REFERENCE_CABINET_HEIGHT_MM
             # Neue AR3.9-Statiktabelle (Ruecksprache): AR3.91 Plus LE,
-            # AR 10.41 und Avora Root duerfen Indoor nur noch bis 6 Cabinets
-            # hoch gebaut werden (echte Statik, ersetzt den alten 12er-
-            # Platzhalter fuer AR3.9/AR10.41) - Outdoor hat eine eigene, noch
-            # nicht hinterlegte Statik und bleibt beim bisherigen Grenzwert.
+            # AR 10.41 und Avora Root duerfen Indoor nur noch 6 m hoch gebaut
+            # werden (echte Statik, ersetzt den alten 12er-Platzhalter fuer
+            # AR3.9/AR10.41) - Outdoor hat eine eigene, noch nicht hinterlegte
+            # Statik und bleibt beim bisherigen Grenzwert. Der Grenzwert ist
+            # eine BAUHOEHE: bei halben Cabinets sind das doppelt so viele
+            # Cabinets (6 -> 12), deshalb ueber die Cabinet-Hoehe umgerechnet.
             if product_id in NEW_AR_STACKING_PRODUCT_IDS and location == "indoor":
-                max_stacking_height = NEW_AR_STACKING_INDOOR_MAX_HEIGHT
-            if max_stacking_height is None or height_cabinets > max_stacking_height:
+                max_stacking_height = (
+                    NEW_AR_STACKING_INDOOR_MAX_HEIGHT
+                    * AR_REFERENCE_CABINET_HEIGHT_MM
+                    // cabinet_height_mm
+                )
+            # Eine halbe oberste Reihe traegt zwar keine Mechanik, macht die
+            # Wand aber trotzdem hoeher - fuer den Grenzwert zaehlt sie
+            # deshalb als angebrochene volle Reihe (sicherheitsgerichtet
+            # aufgerundet).
+            statics_rows = height_cabinets + (1 if half_top_row else 0)
+            if max_stacking_height is None or statics_rows > max_stacking_height:
                 return {"error": STACKING_HEIGHT_LIMIT_ERROR}
             # stacker_span: 2 fuer die meisten Produkte (Aura-Konzept), 3 fuer
             # VENUS/JUPITER (siehe STACKER_SPAN_BY_PRODUCT) - gilt sowohl fuer
@@ -1417,7 +1578,21 @@ def calculate_mechanics(product_id, width_cabinets, height_cabinets, system_name
                 # bereits als None normalisiert.
                 components = _calculate_aura_flex_mechanics(width_cabinets, height_cabinets, person_contact, stacker_span)
             else:
-                components = _calculate_ar_stacking_mechanics(width_cabinets, height_cabinets, person_contact, curving_mode, location)
+                # "AR-Stacking" (Indoor) und "AR-Outdoor-Stacking" teilen sich
+                # denselben Rechenweg - Unterschiede sind allein die
+                # Artikelnummern (siehe AR_OUTDOOR_STACKING_SYSTEM) und der
+                # fehlende Single Foot im Outdoor-Baukasten.
+                components = _calculate_ar_stacking_mechanics(
+                    width_cabinets, height_cabinets, person_contact, curving_mode, location,
+                    include_single_feet=system_name != AR_OUTDOOR_STACKING_SYSTEM,
+                    cabinet_height_mm=cabinet_height_mm,
+                )
+                # Die AR-Systeme haben ihre eigene Stacker-Spannweite (1 m
+                # Bauteil, siehe _ar_stacker_span_rows) - sie ersetzt den
+                # generischen Aura-Wert, damit die Visualisierung den
+                # Stacker-Balken genauso hoch zeichnet, wie die Stueckliste
+                # ihn zaehlt.
+                stacker_band_rows = _ar_stacker_span_rows(cabinet_height_mm)
             # Die Pipe ist ein einzelnes durchgehendes Bauteil ueber die
             # gesamte Wandbreite - Laenge in Metern statt Stueckzahl.
             if components["pipe_count"] > 0:
@@ -1434,7 +1609,7 @@ def calculate_mechanics(product_id, width_cabinets, height_cabinets, system_name
             # hinterlegt" statt einer geschaetzten Zahl.
             stacker_axis_count = components["nobase_footbeams"] if system_name == "NoBase" else components["footbeams"]
             ballast = _calculate_ballast(product_id, height_cabinets, stacker_axis_count)
-            if system_name == "AR-Stacking":
+            if system_name in ("AR-Stacking", AR_OUTDOOR_STACKING_SYSTEM):
                 stacking_setup_label = _ar_stacking_setup_label(height_cabinets, person_contact, location)
             elif product_id in NEW_AR_STACKING_PRODUCT_IDS and location == "indoor":
                 # Nur Avora Root (20) erreicht diesen Zweig - AR3.91/AR10.41
@@ -1572,6 +1747,10 @@ def api_mechanics_options():
     product_id = request.args.get("product_id", type=int)
     if product_id is None:
         return jsonify({"error": "product_id ist erforderlich"}), 400
+    # Einsatzort steuert zusaetzlich, welche Systeme ueberhaupt angeboten
+    # werden (siehe SYSTEM_LOCATION_ONLY) - Outdoor bekommt die AR-Familie
+    # den ER-Baukasten statt des Indoor-Systems.
+    location = request.args.get("location")
 
     conn = get_db_connection()
     rows = conn.execute(
@@ -1588,7 +1767,22 @@ def api_mechanics_options():
 
     systems_by_mode = {}
     for row in rows:
+        # Systeme, die an einen anderen Einsatzort gebunden sind, fallen raus.
+        required_location = SYSTEM_LOCATION_ONLY.get(row["system_name"])
+        if required_location is not None and required_location != location:
+            continue
         systems_by_mode.setdefault(row["mode"], []).append(row["system_name"])
+
+    # Ist ein einsatzort-exklusives System uebrig geblieben, verdraengt es die
+    # von ihm abgeloesten Indoor-Systeme, statt zusaetzlich zur Wahl zu stehen.
+    replaced = set()
+    for systems in systems_by_mode.values():
+        for name in systems:
+            replaced |= SYSTEM_REPLACED_BY.get(name, set())
+    if replaced:
+        for mode, systems in systems_by_mode.items():
+            systems_by_mode[mode] = [name for name in systems if name not in replaced]
+        systems_by_mode = {mode: systems for mode, systems in systems_by_mode.items() if systems}
 
     mode_order = ["Stacking", "Hanging", "Wall-Adapter"]
     modes = [
@@ -1613,6 +1807,8 @@ def api_calculate_mechanics():
     location = request.args.get("location")  # "indoor" | "outdoor" - nur fuer LIAM-Truss relevant
     curving_mode = request.args.get("curving_mode")  # "flat" | "concave" | "convex"
     curving_angle_deg = request.args.get("curving_angle_deg", type=float)
+    # Oberste Reihe als halbes Cabinet (siehe calculate_mechanics)
+    half_top_row = request.args.get("half_top_row", "").lower() in ("1", "true")
 
     if product_id is None or width_cabinets is None or height_cabinets is None or not system_name:
         return jsonify({"error": "product_id, width_cabinets, height_cabinets und system_name sind erforderlich"}), 400
@@ -1621,7 +1817,7 @@ def api_calculate_mechanics():
 
     result = calculate_mechanics(
         product_id, width_cabinets, height_cabinets, system_name, person_contact, location,
-        curving_mode, curving_angle_deg,
+        curving_mode, curving_angle_deg, half_top_row,
     )
     if result is None:
         return jsonify({"error": f"Produkt unterstuetzt das System '{system_name}' nicht"}), 400
