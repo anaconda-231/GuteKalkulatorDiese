@@ -358,6 +358,47 @@ SYSTEM_LOCATION_ONLY = {AR_OUTDOOR_STACKING_SYSTEM: "outdoor"}
 # Montagekonzept und bleibt Outdoor waehlbar.
 SYSTEM_REPLACED_BY = {AR_OUTDOOR_STACKING_SYSTEM: {"AR-Stacking", "Standard-Stacking"}}
 
+# Outdoor nicht baubare Montagearten (Ruecksprache): ARUNA, Avora und Avora
+# Root bekommen im Aussenbereich weder NoBase noch Wandadapter angeboten. Die
+# 500x500-Varianten von Avora/Avora Root sind dasselbe Panel in halber
+# Bauhoehe und deshalb mit gelistet.
+OUTDOOR_BLOCKED_SYSTEMS_BY_PRODUCT = {
+    2: {"NoBase", "Wandadapter"},   # ARUNA
+    19: {"NoBase", "Wandadapter"},  # Avora
+    20: {"NoBase", "Wandadapter"},  # Avora Root
+    80: {"NoBase", "Wandadapter"},  # Avora 500x500
+    81: {"NoBase", "Wandadapter"},  # Avora Root 500x500
+}
+
+
+def _is_system_blocked_outdoor(product_id, system_name, location):
+    if location != "outdoor":
+        return False
+    return system_name in OUTDOOR_BLOCKED_SYSTEMS_BY_PRODUCT.get(product_id, ())
+
+
+# Outdoor-Statik (Ruecksprache): sobald outdoor gebaut wird, ist die Statik
+# projektbezogen - der Hinweis haengt deshalb an JEDEM Produkt/System, sobald
+# location == "outdoor" ist (siehe calculate_mechanics, Ende).
+OUTDOOR_STATICS_NOTE = (
+    "Outdoor-Aufbau: Für diesen Aufbau muss eine eigene Statik vom Kunden "
+    "angefragt werden."
+)
+
+# ARUNA Outdoor (Ruecksprache): zusaetzlich zum allgemeinen Statik-Hinweis
+# gibt es hier KEINE gerechnete Stacking-Stueckliste mehr - ARUNA wird Outdoor
+# mit einem Eurotruss-System gebaut. Die komplette Mechanik-Rechnung
+# (Basements/Footbeam/Stacker/Clamp, Ausleger-Kaskade, Ballast, Hoehengrenze)
+# wird fuer diesen Fall uebersprungen; ausgegeben wird nur die eine Position
+# "Eurotruss". Gilt bewusst NUR fuer ARUNA - alle anderen Outdoor-Produkte
+# behalten ihre Stueckliste und bekommen lediglich den Hinweis oben.
+ARUNA_PRODUCT_ID = 2
+EUROTRUSS_SYSTEM_LABEL = "Eurotruss-System"
+EUROTRUSS_NOTE = (
+    "Gebaut wird mit einem Eurotruss-System - weitere Bauteile werden "
+    "hierfür nicht ausgegeben."
+)
+
 # Platzhalter-Gradstufen (Grad pro Fuge, Concave/Convex) - keine realen
 # Datenblattwerte vorhanden, muss durch die LANG AG bestaetigt werden. Pro
 # Produkt-ID hinterlegt (aktuell ueberall dieselben Werte), damit produkt-
@@ -1518,6 +1559,30 @@ def calculate_mechanics(product_id, width_cabinets, height_cabinets, system_name
         if not _product_uses_system(conn, product_id, system_name):
             return None
 
+        # Gleiche Sperre wie in /api/mechanics-options - schuetzt zusaetzlich
+        # gegen ein Frontend, das noch eine alte Systemauswahl mitschickt.
+        if _is_system_blocked_outdoor(product_id, system_name, location):
+            return None
+
+        # ARUNA Outdoor: keine Mechanik-Berechnung, nur Eurotruss-System +
+        # Statik-Hinweis (siehe OUTDOOR_STATICS_NOTE). Bewusst vor jeder
+        # Statik-/Stuecklisten-Logik, damit weder Hoehengrenze noch Ballast
+        # oder Bauteile berechnet oder ausgegeben werden.
+        if product_id == ARUNA_PRODUCT_ID and location == "outdoor":
+            return {
+                "system": EUROTRUSS_SYSTEM_LABEL,
+                # Genau eine Stueckliste-Zeile: "Eurotruss". Mehr Bauteile
+                # werden bewusst nicht ausgegeben (Ruecksprache).
+                "components": {"eurotruss": 1},
+                "stacking_setup_label": None,
+                "validation_note": f"{OUTDOOR_STATICS_NOTE} {EUROTRUSS_NOTE}",
+                "grid": None,
+                "curving_mode": None,
+                "curving_angle_deg": None,
+                "stacker_band_rows": None,
+                "ballast": None,
+            }
+
         stacking_setup_label = None
         validation_note = None
         grid = None
@@ -1706,6 +1771,16 @@ def calculate_mechanics(product_id, width_cabinets, height_cabinets, system_name
         else:  # "Wandadapter"
             components = _calculate_wandadapter_mechanics(width_cabinets, height_cabinets)
 
+        # Outdoor-Statik-Hinweis (Ruecksprache): gilt fuer JEDES Produkt und
+        # JEDES System, sobald outdoor gebaut wird - die Statik ist dann
+        # projektbezogen und muss vom Kunden angefragt werden. Ein bereits
+        # gesetzter systemspezifischer Hinweis (z.B. Vanish-Hanging) bleibt
+        # erhalten und wird ergaenzt statt ersetzt.
+        if location == "outdoor":
+            validation_note = (
+                f"{OUTDOOR_STATICS_NOTE} {validation_note}" if validation_note else OUTDOOR_STATICS_NOTE
+            )
+
         return {
             "system": system_name,
             "components": components,
@@ -1770,6 +1845,10 @@ def api_mechanics_options():
         # Systeme, die an einen anderen Einsatzort gebunden sind, fallen raus.
         required_location = SYSTEM_LOCATION_ONLY.get(row["system_name"])
         if required_location is not None and required_location != location:
+            continue
+        # Produktspezifisch Outdoor gesperrte Montagearten (NoBase/Wandadapter
+        # bei ARUNA/Avora/Avora Root) tauchen erst gar nicht in der Auswahl auf.
+        if _is_system_blocked_outdoor(product_id, row["system_name"], location):
             continue
         systems_by_mode.setdefault(row["mode"], []).append(row["system_name"])
 

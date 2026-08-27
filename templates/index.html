@@ -1596,6 +1596,13 @@
     // CURVING_CAPABLE_SYSTEMS in server.py) UND fuer die das Produkt
     // ueberhaupt Gradstufen hinterlegt hat (curving_degree_steps aus
     // /api/mechanics-options, leer = Produkt nicht curving-faehig).
+    // ARUNA Outdoor: das Backend liefert statt einer Stueckliste nur diesen
+    // Systemnamen + den Statik-Hinweis (siehe server.py,
+    // EUROTRUSS_SYSTEM_LABEL/OUTDOOR_STATICS_NOTE). Es gibt bewusst keinen
+    // Eintrag in MECHANICS_ROWS_BY_SYSTEM/ARTICLE_PART_BY_SYSTEM - die
+    // Stueckliste bleibt dadurch automatisch leer.
+    const EUROTRUSS_SYSTEM_LABEL = "Eurotruss-System";
+
     const CURVING_CAPABLE_SYSTEM_NAMES = new Set([
         "Standard-Stacking", "AR-Stacking", "Hanging-Truss", "AR-Hanging", "LIAM-Truss",
         "AR-Outdoor-Stacking"
@@ -1941,6 +1948,13 @@
             { key: "diagonale_kurz", label: "Kurze Diagonale", color: "#fbbf24", weightKg: null },
             { key: "attachment", label: "Attachment", color: "#14b8a6", weightKg: null },
             { key: "pipe_count", label: r => `Pipe${r.pipe_length_m ? ` (Länge: ${r.pipe_length_m} m)` : ""}`, color: "#7c3aed", weightKg: null }
+        ],
+        // ARUNA Outdoor (Ruecksprache): keine berechnete Mechanik mehr -
+        // gebaut wird ein Eurotruss-System, weitere Bauteile werden nicht
+        // ausgegeben. Die Statik muss projektbezogen beim Kunden angefragt
+        // werden (Hinweis kommt als validation_note aus server.py).
+        "Eurotruss-System": [
+            { key: "eurotruss", label: "Eurotruss", color: "#0ea5e9", weightKg: null }
         ],
         "Hanging-Truss": [
             // Einzige Baugruppe: bildet sowohl die mechanische Breiten-
@@ -3745,6 +3759,11 @@
         function renderMechanics(layout, cols, rows, components) {
             if (!components) return;
 
+            // ARUNA Outdoor: Eurotruss-System ohne Bauteile (siehe server.py,
+            // OUTDOOR_STATICS_NOTE) - es gibt nichts zu zeichnen, die Statik
+            // kommt projektbezogen vom Kunden.
+            if (components.system === EUROTRUSS_SYSTEM_LABEL) return;
+
             if (components.system === "Hanging-Truss" || components.system === "AR-Hanging") {
                 // AR-Hanging (AR3.9, Korrektur) nutzt dieselbe 3-2-1-
                 // Breiten-Optimierung wie Aura Hanging-Truss (server.py:
@@ -5170,6 +5189,14 @@
         let currentUsage;      // "fest" | "temporaer" | null - steuert die Markenliste
         let currentProduct = null;
 
+        // Aktuelle Wandgroesse, in render() gesetzt - Grundlage fuer die
+        // Vorauswahl des kleinstmoeglichen Modells (siehe
+        // pickSmallestModelKey). modelChosenByUser schuetzt eine manuelle
+        // Modellwahl davor, von dieser Automatik ueberschrieben zu werden.
+        let currentCols = 0;
+        let currentRows = 0;
+        let modelChosenByUser = false;
+
         // Die Empfangskarte haengt am Panel, nicht an der Einsatzart - die
         // Regeln greifen deshalb sowohl temporaer als auch bei
         // Festinstallation (siehe PRODUCT_CONTROLLER_COMPAT).
@@ -5281,16 +5308,99 @@
             return card.capacity[bitDepth];
         }
 
+        // ---- Vorauswahl: kleinstmoeglicher Controller --------------------
+        // Vorgabe: das Programm soll immer den kleinstmoeglichen Controller
+        // vorschlagen. Die Reihenfolge in CONTROLLER_DB beginnt jeweils beim
+        // groessten Modell, ein einfaches "erste Option" waere also genau die
+        // falsche Vorauswahl. Stattdessen werden die erlaubten Modelle nach
+        // ihrer Kapazitaet sortiert und das kleinste Modell gewaehlt, das die
+        // aktuelle Wand noch mit einem einzigen Geraet treibt. Passt die Wand
+        // in kein einziges Modell, gewinnt das groesste (das minimiert dann
+        // die Controlleranzahl, siehe computeControllerPlan).
+        function allowedModelKeys(brand) {
+            const models = brand ? CONTROLLER_DB[brand].models : {};
+            const compat = getCompat();
+            const allowed = compat && compat.models[brand];
+            return Object.keys(models).filter(key => !allowed || allowed.includes(key));
+        }
+
+        // Kapazitaet eines Modells in seiner guenstigsten Grundkonfiguration
+        // (erste erlaubte Empfangskarte, niedrigste Bit-Tiefe, 50 Hz wenn
+        // verfuegbar - analog zur Vorauswahl in populateRefreshRates). Das
+        // ist bewusst dieselbe Kombination, die die Kaskade nach der
+        // Modellwahl selbst einstellt, damit Vorauswahl und angezeigte
+        // Auslastung zusammenpassen.
+        function modelBaseCapacity(model, cardKeys) {
+            const card = cardKeys.length ? model.receivingCards[cardKeys[0]] : null;
+            if (!card) return 0;
+            const bitDepth = (card.flatCapacity ? numericKeys(card.flatCapacity) : numericKeys(card.capacity))[0];
+            if (!bitDepth) return 0;
+            let refreshRate = null;
+            if (!card.flatCapacity) {
+                const freqs = Object.keys(getFrequencyTable(card, bitDepth, "standard") || {})
+                    .map(Number).sort((a, b) => a - b);
+                if (!freqs.length) return 0;
+                refreshRate = freqs.includes(50) ? 50 : freqs[0];
+            }
+            const portSum = getPortCapacity(card, bitDepth, refreshRate, "standard") * model.ports;
+            const deviceMax = getDeviceMaxPixels(model, refreshRate);
+            return deviceMax > 0 ? Math.min(portSum, deviceMax) : portSum;
+        }
+
+        function pickSmallestModelKey(brand, modelKeys) {
+            const models = CONTROLLER_DB[brand].models;
+            const compat = getCompat();
+            const ranked = modelKeys.map(key => {
+                const model = models[key];
+                const allowed = compat && compat.cards[key];
+                const cardKeys = Object.keys(model.receivingCards)
+                    .filter(k => !allowed || allowed.includes(k));
+                return { key, capacity: modelBaseCapacity(model, cardKeys) };
+            }).sort((a, b) => a.capacity - b.capacity);
+
+            const pixelsPerCabinet = getPixelsPerCabinet(currentProduct);
+            const neededPixels = pixelsPerCabinet ? pixelsPerCabinet * currentCols * currentRows : 0;
+            if (neededPixels <= 0) return ranked[0].key;
+            const fitting = ranked.find(r => r.capacity >= neededPixels);
+            return fitting ? fitting.key : ranked[ranked.length - 1].key;
+        }
+
+        // Solange das Modell nicht manuell gewaehlt wurde, wird die
+        // Vorauswahl bei jeder Groessenaenderung neu bestimmt - waechst die
+        // Wand ueber die Kapazitaet des bisherigen Modells hinaus, rutscht
+        // die Vorauswahl automatisch eine Stufe hoeher (und wieder zurueck,
+        // wenn die Wand kleiner wird).
+        function applySmallestModelDefault() {
+            if (modelChosenByUser) return;
+            const brand = controllerBrandSelect.value;
+            if (!brand) return;
+            const keys = allowedModelKeys(brand);
+            if (!keys.length) return;
+            const key = pickSmallestModelKey(brand, keys);
+            if (key === controllerModelSelect.value) return;
+            controllerModelSelect.value = key;
+            populateReceivingCards();
+        }
+
         // ---- Dropdown-Kaskade ------------------------------------------
         function populateModels() {
             const brand = controllerBrandSelect.value;
             const models = brand ? CONTROLLER_DB[brand].models : {};
-            const compat = getCompat();
-            const allowedModelKeys = compat && compat.models[brand];
-            const options = Object.entries(models)
-                .filter(([key]) => !allowedModelKeys || allowedModelKeys.includes(key))
-                .map(([key, m]) => ({ value: key, text: m.label }));
+            const modelKeys = allowedModelKeys(brand);
+            const options = modelKeys.map(key => ({ value: key, text: models[key].label }));
             fillSelect(controllerModelSelect, options, "-- Bitte zuerst Controller Brand wählen --");
+            // Neuaufbau der Liste = neue Ausgangslage, eine fruehere manuelle
+            // Wahl gilt nicht mehr fuer die neue Marke/das neue Panel.
+            modelChosenByUser = false;
+            if (modelKeys.length) controllerModelSelect.value = pickSmallestModelKey(brand, modelKeys);
+            populateReceivingCards();
+        }
+
+        // Vom change-Handler des Modell-Dropdowns aufgerufen: markiert die
+        // Wahl als manuell, damit applySmallestModelDefault sie nicht bei der
+        // naechsten Groessenaenderung wieder ueberschreibt.
+        function onModelUserChange() {
+            modelChosenByUser = true;
             populateReceivingCards();
         }
 
@@ -5464,7 +5574,13 @@
         }
 
         function render(product, cols, rows) {
+            // Wandgroesse zuerst uebernehmen - setProduct/
+            // applySmallestModelDefault brauchen sie fuer die Vorauswahl des
+            // kleinstmoeglichen Modells.
+            currentCols = cols;
+            currentRows = rows;
             setProduct(product);
+            applySmallestModelDefault();
             const plan = computeControllerPlan(product, cols, rows);
 
             if (!plan) {
@@ -5574,7 +5690,7 @@
             return lastSnapshot;
         }
 
-        return { render, populateModels, populateReceivingCards, populateBitDepths, populateRefreshRates, getWiringInfo, getSnapshot, getFiberClass };
+        return { render, populateModels, populateReceivingCards, onModelUserChange, populateBitDepths, populateRefreshRates, getWiringInfo, getSnapshot, getFiberClass };
     })();
 
     // ------------------------------------------------------------------
@@ -6319,7 +6435,10 @@
         update();
     });
     controllerModelSelect.addEventListener("change", () => {
-        ControllerModule.populateReceivingCards();
+        // onModelUserChange statt populateReceivingCards: eine manuelle
+        // Modellwahl darf nicht von der Kleinst-Controller-Vorauswahl
+        // ueberschrieben werden (siehe applySmallestModelDefault).
+        ControllerModule.onModelUserChange();
         update();
     });
     receivingCardSelect.addEventListener("change", () => {
@@ -6596,6 +6715,12 @@
             const { main, accessories } = splitMechanicsRows(result);
             mainHtml = mechanicsRowsToHtml(main, result, product, "Keine Positionen.");
             accessoryHtml = mechanicsRowsToHtml(accessories, result, product, "Kein Zubehör erforderlich.", true);
+            // Statik-/Validierungshinweis (z.B. ARUNA Outdoor: eigene Statik
+            // vom Kunden anfragen) - im Bericht genauso sichtbar wie auf dem
+            // Bildschirm, direkt ueber der Haupt-Stueckliste.
+            if (result.validation_note) {
+                mainHtml = `<p class="pdf-warning">${result.validation_note}</p>${mainHtml}`;
+            }
             headingSuffix = ` (${SYSTEM_LABELS[result.system] || result.system})`;
         }
 
