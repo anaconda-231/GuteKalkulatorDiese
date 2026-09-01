@@ -5309,6 +5309,13 @@
         }
 
         // ---- Vorauswahl: kleinstmoeglicher Controller --------------------
+        // Zwei Vorgaben steuern die Vorauswahl zusaetzlich zur Kapazitaet:
+        // die MCTRL-Reihe wird nie vorgeschlagen (Einstiegsmodell ist der
+        // KU20), und bei Kapazitaetsgleichstand gewinnt der KU20. Im Dropdown
+        // bleiben MCTRL-Modelle jederzeit manuell waehlbar.
+        const MCTRL_MODEL_PREFIX = "mctrl";
+        const PREFERRED_ENTRY_MODEL = "ku20";
+
         // Vorgabe: das Programm soll immer den kleinstmoeglichen Controller
         // vorschlagen. Die Reihenfolge in CONTROLLER_DB beginnt jeweils beim
         // groessten Modell, ein einfaches "erste Option" waere also genau die
@@ -5356,13 +5363,23 @@
                 const cardKeys = Object.keys(model.receivingCards)
                     .filter(k => !allowed || allowed.includes(k));
                 return { key, capacity: modelBaseCapacity(model, cardKeys) };
-            }).sort((a, b) => a.capacity - b.capacity);
+            }).sort((a, b) =>
+                a.capacity - b.capacity ||
+                // Gleichstand (KU20 und MX20 liegen beide bei 3,9 Mio Pixel):
+                // der KU20 ist das gewuenschte Einstiegsmodell.
+                (b.key === PREFERRED_ENTRY_MODEL) - (a.key === PREFERRED_ENTRY_MODEL));
+
+            // MCTRL-Modelle aus der Vorauswahl ausklammern (Vorgabe) - nur
+            // wenn ein Panel ausschliesslich MCTRL zulaesst (AR 10.41 ueber
+            // MCTRL_ONLY_COMPAT), bleibt die MCTRL-Reihe als Pool uebrig.
+            const preferred = ranked.filter(r => !r.key.startsWith(MCTRL_MODEL_PREFIX));
+            const pool = preferred.length ? preferred : ranked;
 
             const pixelsPerCabinet = getPixelsPerCabinet(currentProduct);
             const neededPixels = pixelsPerCabinet ? pixelsPerCabinet * currentCols * currentRows : 0;
-            if (neededPixels <= 0) return ranked[0].key;
-            const fitting = ranked.find(r => r.capacity >= neededPixels);
-            return fitting ? fitting.key : ranked[ranked.length - 1].key;
+            if (neededPixels <= 0) return pool[0].key;
+            const fitting = pool.find(r => r.capacity >= neededPixels);
+            return fitting ? fitting.key : pool[pool.length - 1].key;
         }
 
         // Solange das Modell nicht manuell gewaehlt wurde, wird die
