@@ -134,6 +134,13 @@
         flex: 1;
     }
 
+    /* Pixelpitch von/bis: zwei gleich breite Felder direkt in der Zeile,
+       ohne eigene field-group-Huelle je Feld. */
+    .dimension-row > input {
+        flex: 1;
+        min-width: 0;
+    }
+
     /* Einheiten-Umschalter unter Breite/Hoehe (Cabinets vs. Meter) */
     .radio-row {
         display: flex;
@@ -1052,10 +1059,33 @@
             </div>
         </div>
 
+        <!-- EIN Montageart-Feld mit zwei Rollen (Ruecksprache: kein doppeltes
+             Dropdown): solange kein Produkt gewaehlt ist, stehen hier die
+             Montagearten als FILTER (Stacking/Hanging/Wandadapter) und die
+             Produktliste darunter zeigt nur die passenden Produkte. Sobald
+             ein Produkt gewaehlt ist, stehen hier die konkreten Systeme
+             dieses Produkts - die zuvor gewaehlte Montageart wird dabei
+             uebernommen (siehe loadMechanicsOptions). -->
+        <div class="field-group" id="mounting-type-group">
+            <label for="mounting-type-select">Montageart</label>
+            <select id="mounting-type-select">
+                <option value="">-- Alle Montagearten --</option>
+            </select>
+        </div>
+
+        <div class="field-group" id="pixelpitch-filter-group">
+            <label>Pixelpitch (mm)</label>
+            <div class="dimension-row">
+                <input type="number" id="pixelpitch-min" min="0" step="0.1" placeholder="von">
+                <input type="number" id="pixelpitch-max" min="0" step="0.1" placeholder="bis">
+            </div>
+            <p class="dimension-hint" id="product-filter-hint"></p>
+        </div>
+
         <div class="field-group">
             <label for="product-select" id="product-select-label">Produkt auswählen</label>
-            <select id="product-select" disabled>
-                <option value="">-- Bitte zuerst Einsatzort und Art des Einsatzes wählen --</option>
+            <select id="product-select">
+                <option value="">-- Bitte wählen --</option>
             </select>
         </div>
 
@@ -1067,13 +1097,6 @@
             <label for="model-select">Modell / Pixelpitch</label>
             <select id="model-select" disabled>
                 <option value="">-- Bitte zuerst Serie wählen --</option>
-            </select>
-        </div>
-
-        <div class="field-group" id="mounting-type-group">
-            <label for="mounting-type-select">Montageart</label>
-            <select id="mounting-type-select">
-                <option value="">-- Bitte wählen --</option>
             </select>
         </div>
 
@@ -1351,6 +1374,46 @@
     let productModels = [];
     const mountingTypeSelect = document.getElementById("mounting-type-select");
     const mountingTypeGroup = document.getElementById("mounting-type-group");
+    const pixelpitchMinInput = document.getElementById("pixelpitch-min");
+    const pixelpitchMaxInput = document.getElementById("pixelpitch-max");
+    const productFilterHintEl = document.getElementById("product-filter-hint");
+
+    function systemLabel(system) {
+        return SYSTEM_LABELS[system] || system;
+    }
+
+    // Gewaehlte Montageart als Anzeige-Label ("Stacking", "No-Base",
+    // "Hanging", "Wandadapter") - die gemeinsame Klammer der beiden Rollen
+    // des Montageart-Dropdowns. Bewusst auf Label- und nicht auf
+    // Modus-Ebene: "No-Base" ist zwar technisch ein System im
+    // Stacking-Modus, im Dropdown aber ein eigener Eintrag und muss sich
+    // deshalb auch einzeln filtern lassen.
+    // Ebenfalls bewusst eine eigene Variable und nicht "was gerade im Select
+    // steht": das Select wird bei jedem Produktwechsel neu aufgebaut
+    // (Montagearten <-> Systeme des Produkts), die Absicht des Nutzers
+    // ("ich will haengen") soll das aber ueberleben.
+    let selectedLabel = null;
+    // Systeme, die es fuer den aktuellen Einsatzort/Einsatz ueberhaupt gibt
+    // (aus /api/product-filters, in Dropdown-Reihenfolge) - Grundlage der
+    // Optionsliste, solange kein Produkt gewaehlt ist.
+    let availableSystems = [];
+
+    // Sichtbare Montageart-Eintraege: die Labels der verfuegbaren Systeme,
+    // dedupliziert und in der vom Backend gelieferten Reihenfolge.
+    function availableLabels() {
+        const labels = [];
+        availableSystems.forEach(system => {
+            const label = systemLabel(system);
+            if (!labels.includes(label)) labels.push(label);
+        });
+        return labels;
+    }
+
+    // Alle Systeme hinter einem Montageart-Label - genau das, was als Filter
+    // ans Backend geht (mounting_systems).
+    function systemsForLabel(label) {
+        return availableSystems.filter(system => systemLabel(system) === label);
+    }
     const widthInput = document.getElementById("cabinets-width");
     const heightInput = document.getElementById("cabinets-height");
     const widthLabelEl = document.getElementById("width-label");
@@ -1428,37 +1491,91 @@
         modelSelect.innerHTML = '<option value="">-- Bitte zuerst Serie wählen --</option>';
     }
 
-    async function loadProducts() {
+    // Aktueller Stand der Filter. Leere Felder = keine Grenze, damit ein
+    // halb ausgefuellter Bereich ("ab 2,5 mm") direkt funktioniert.
+    function getProductFilter() {
+        const min = parseFloat(pixelpitchMinInput.value.replace(",", "."));
+        const max = parseFloat(pixelpitchMaxInput.value.replace(",", "."));
+        return {
+            mountingSystems: selectedLabel ? systemsForLabel(selectedLabel) : [],
+            pixelpitchMin: Number.isFinite(min) ? min : null,
+            pixelpitchMax: Number.isFinite(max) ? max : null
+        };
+    }
+
+    // Alle Filter-/Auswahlparameter (Einsatzort, Einsatzart, Montageart,
+    // Pixelpitch) sind optional und in beliebiger Reihenfolge setzbar - was
+    // nicht gesetzt ist, schraenkt einfach nicht ein. Deshalb landet hier
+    // nur, was tatsaechlich gewaehlt wurde.
+    function buildFilterParams() {
         const { location, usage } = getPreFilter();
+        const { mountingSystems, pixelpitchMin, pixelpitchMax } = getProductFilter();
+        const params = new URLSearchParams();
+        if (location) params.set("location", location);
+        if (usage) params.set("usage", usage);
+        if (mountingSystems.length > 0) params.set("mounting_systems", mountingSystems.join(","));
+        if (pixelpitchMin != null) params.set("pixelpitch_min", pixelpitchMin);
+        if (pixelpitchMax != null) params.set("pixelpitch_max", pixelpitchMax);
+        return params;
+    }
 
-        selectedProduct = null;
-        await loadMechanicsOptions(null);
-        resetModelSelect();
+    // Holt die verfuegbaren Montagearten und den real vorhandenen
+    // Pixelpitch-Bereich (nur als Platzhalter, nicht als Wert - leer soll
+    // weiterhin "keine Grenze" heissen). Laeuft bei jedem Wechsel von
+    // Einsatzort/Einsatzart, weil sich damit beides aendern kann.
+    async function loadProductFilters() {
+        const { location, usage } = getPreFilter();
+        const params = new URLSearchParams();
+        if (location) params.set("location", location);
+        if (usage) params.set("usage", usage);
 
-        if (!location || !usage) {
-            products = [];
-            productSelect.innerHTML = '<option value="">-- Bitte zuerst Einsatzort und Art des Einsatzes wählen --</option>';
-            productSelect.disabled = true;
-            productSelectLabel.textContent = "Produkt auswählen";
-            update();
-            return;
+        const response = await fetch(`/api/product-filters?${params.toString()}`);
+        const data = await response.json();
+
+        availableSystems = data.mounting_systems || [];
+        // Eine bereits gewaehlte Montageart faellt nur dann weg, wenn sie im
+        // neuen Einsatzort/Einsatz gar nicht mehr gebaut werden kann (z.B.
+        // Wandadapter nach dem Umschalten auf Outdoor).
+        if (selectedLabel && !availableLabels().includes(selectedLabel)) {
+            selectedLabel = null;
         }
 
-        // Festinstallation: zweistufige Auswahl (Serie -> Modell/Pixelpitch,
-        // siehe /api/product-series + /api/product-models). Temporaerer
-        // Einsatz bleibt bei der bisherigen flachen Produktliste
-        // (/api/products) - die neue Kaskade ist exklusiv fuer
-        // Festinstallation, siehe Ruecksprache.
-        const isFest = usage === "fest";
-        productSelectLabel.textContent = isFest ? "Serie auswählen" : "Produkt auswählen";
+        pixelpitchMinInput.placeholder = data.pixelpitch_min != null ? `von ${data.pixelpitch_min}` : "von";
+        pixelpitchMaxInput.placeholder = data.pixelpitch_max != null ? `bis ${data.pixelpitch_max}` : "bis";
+    }
 
-        const params = new URLSearchParams({ location, usage });
-        const endpoint = isFest ? "/api/product-series" : "/api/products";
+    async function loadProducts() {
+        const { usage } = getPreFilter();
+
+        // Auswahl vor dem Neuladen merken und danach wiederherstellen, falls
+        // sie den neuen Filter noch erfuellt. Ohne das wuerde z.B. ein
+        // nachtraegliches Setzen von "Indoor" das bereits gewaehlte Produkt
+        // wegwerfen - genau das soll die freie Reihenfolge verhindern.
+        const previousProductId = selectedProduct
+            ? String(selectedProduct.product_id)
+            : (productSelect.value || null);
+        const previousArticleId = selectedProduct && selectedProduct.article_id != null
+            ? String(selectedProduct.article_id)
+            : null;
+
+        // Temporaerer Einsatz nutzt die flache Produktliste (/api/products),
+        // sonst die zweistufige Serien-Kaskade (/api/product-series ->
+        // /api/product-models, siehe Ruecksprache Festinstallation). Solange
+        // die Einsatzart noch nicht gewaehlt ist, wird die Kaskade benutzt:
+        // sie deckt alle Produkte ab und zeigt das Modell-Dropdown ohnehin
+        // nur bei echten Mehrmodell-Serien.
+        const useSeriesCascade = usage !== "temporaer";
+        productSelectLabel.textContent = useSeriesCascade ? "Serie auswählen" : "Produkt auswählen";
+
+        const params = buildFilterParams();
+        const endpoint = useSeriesCascade ? "/api/product-series" : "/api/products";
         const response = await fetch(`${endpoint}?${params.toString()}`);
         products = await response.json();
 
-        productSelect.disabled = false;
-        productSelect.innerHTML = '<option value="">-- Bitte wählen --</option>';
+        productSelect.disabled = products.length === 0;
+        productSelect.innerHTML = products.length > 0
+            ? '<option value="">-- Bitte wählen --</option>'
+            : '<option value="">-- Kein Produkt passt zu diesem Filter --</option>';
         products.forEach(p => {
             const option = document.createElement("option");
             option.value = p.product_id;
@@ -1466,7 +1583,58 @@
             productSelect.appendChild(option);
         });
 
+        const unit = useSeriesCascade ? "Serie" : "Produkt";
+        const unitPlural = useSeriesCascade ? "Serien" : "Produkte";
+        productFilterHintEl.textContent = products.length === 1
+            ? `1 ${unit} passt zum Filter.`
+            : `${products.length} ${unitPlural} passen zum Filter.`;
+
+        const keep = previousProductId && products.some(p => String(p.product_id) === previousProductId);
+        productSelect.value = keep ? previousProductId : "";
+        await applyProductChoice(keep ? previousProductId : null, keep ? previousArticleId : null);
+
         update();
+    }
+
+    // Uebernimmt eine Produkt-/Serienwahl: befuellt bei der Serien-Kaskade
+    // das Modell-Dropdown und laedt danach die Montagearten des Produkts.
+    // Wird sowohl vom Dropdown-Handler als auch von loadProducts
+    // (Wiederherstellung nach Filterwechsel) benutzt, damit es nur einen
+    // Weg in diesen Zustand gibt.
+    // preferredArticleId: Modell, das nach einem Filterwechsel wieder
+    // gesetzt werden soll, sofern es noch in der Liste steht.
+    async function applyProductChoice(productId, preferredArticleId) {
+        const { usage } = getPreFilter();
+        selectedProduct = null;
+
+        if (!productId) {
+            resetModelSelect();
+            await loadMechanicsOptions(null);
+            return;
+        }
+
+        if (usage === "temporaer") {
+            resetModelSelect();
+            selectedProduct = products.find(p => String(p.product_id) === String(productId)) || null;
+            await loadMechanicsOptions(selectedProduct ? selectedProduct.product_id : null);
+            return;
+        }
+
+        // Serien-Kaskade: hat die Serie nur ein Modell (z.B. LIAM, AURA),
+        // liefert loadProductModels es direkt zurueck und es wird ohne
+        // weiteren Auswahlschritt uebernommen. Bei echten Mehrmodell-Serien
+        // bleibt selectedProduct leer, bis im Modell-Dropdown gewaehlt wird.
+        const autoModel = await loadProductModels(productId);
+        if (autoModel) {
+            selectedProduct = autoModel;
+        } else if (preferredArticleId) {
+            const match = productModels.find(m => String(m.article_id) === preferredArticleId);
+            if (match) {
+                selectedProduct = match;
+                modelSelect.value = preferredArticleId;
+            }
+        }
+        await loadMechanicsOptions(selectedProduct ? selectedProduct.product_id : null);
     }
 
     // Befuellt das Modell-Dropdown mit den Modellen/Pixelpitches einer
@@ -1487,8 +1655,15 @@
             return null;
         }
 
-        const { location } = getPreFilter();
-        const params = new URLSearchParams({ product_id: seriesId, location, usage: "fest" });
+        // Einsatzort/Einsatzart/Pixelpitch werden mitgeschickt, soweit
+        // gesetzt (buildFilterParams) - der Pixelpitch-Filter gilt auch
+        // innerhalb der Serie, sonst liesse sich ueber das Modell-Dropdown
+        // ein Pitch waehlen, der gerade ausgefiltert wurde. Die Montageart
+        // ist hier irrelevant, weil alle Modelle einer Serie dieselbe
+        // Mechanik nutzen.
+        const params = buildFilterParams();
+        params.delete("mounting_systems");
+        params.set("product_id", seriesId);
         const response = await fetch(`/api/product-models?${params.toString()}`);
         productModels = await response.json();
 
@@ -1525,15 +1700,29 @@
     // weiterhin einfach "Stacking" im Dropdown, waehrend im Hintergrund pro
     // Produkt automatisch das richtige System berechnet wird.
     async function loadMechanicsOptions(productId) {
-        mountingTypeSelect.innerHTML = '<option value="">-- Bitte wählen --</option>';
         curvingDegreeSteps = [];
 
+        // Ohne gewaehltes Produkt ist das Dropdown der Montageart-Filter: es
+        // listet die Montageart-Labels (Stacking, No-Base, Hanging,
+        // Wandadapter), nicht die produktspezifischen Systemnamen dahinter.
         if (!productId) {
-            mountingTypeGroup.style.display = "flex";
+            const labels = availableLabels();
+            mountingTypeSelect.innerHTML = '<option value="">-- Alle Montagearten --</option>';
+            labels.forEach(label => {
+                const option = document.createElement("option");
+                option.value = label;
+                option.dataset.isLabel = "1";
+                option.textContent = label;
+                mountingTypeSelect.appendChild(option);
+            });
+            mountingTypeSelect.value = selectedLabel || "";
+            mountingTypeGroup.style.display = labels.length > 0 ? "flex" : "none";
             updateCurvingVisibility();
             updatePersonContactVisibility();
             return;
         }
+
+        mountingTypeSelect.innerHTML = '<option value="">-- Bitte wählen --</option>';
 
         // Einsatzort mitschicken: er entscheidet, ob die AR-Familie das
         // Indoor- oder das Outdoor-Stacking angeboten bekommt (siehe
@@ -1552,7 +1741,7 @@
                 const option = document.createElement("option");
                 option.value = system;
                 option.dataset.mode = mode;
-                option.textContent = SYSTEM_LABELS[system] || system;
+                option.textContent = systemLabel(system);
                 mountingTypeSelect.appendChild(option);
             });
         });
@@ -1563,14 +1752,34 @@
         // Auswahl.
         mountingTypeGroup.style.display = modes.length > 0 ? "flex" : "none";
 
+        // Hat der Nutzer die Montageart schon vor der Produktwahl festgelegt,
+        // wird hier automatisch das passende System des Produkts
+        // vorausgewaehlt - die Auswahl bleibt aber aenderbar. Nur wenn genau
+        // ein System dieses Produkts das Label traegt, sonst waere die Wahl
+        // willkuerlich.
+        if (selectedLabel) {
+            const matching = modes
+                .flatMap(entry => entry.systems)
+                .filter(system => systemLabel(system) === selectedLabel);
+            if (matching.length === 1) {
+                mountingTypeSelect.value = matching[0];
+            }
+        }
+
         curvingDegreeSteps = data.curving_degree_steps || [];
         populateCurvingAngleOptions(curvingDegreeSteps);
         updateCurvingVisibility();
         updatePersonContactVisibility();
     }
 
+    // Konkretes Mechanik-System (fuer /api/calculate_mechanics). Steht im
+    // Dropdown gerade nur ein Montageart-FILTER (kein Produkt gewaehlt), gibt
+    // es noch kein System - dann bewusst null, damit der Modusname
+    // ("Stacking") nie als Systemname ans Backend geht.
     function getSelectedSystemName() {
-        return mountingTypeSelect.value || null;
+        const option = mountingTypeSelect.selectedOptions[0];
+        if (!option || !option.value || option.dataset.isLabel === "1") return null;
+        return option.value;
     }
 
     function getSelectedSystemMode() {
@@ -6380,31 +6589,7 @@
     compareBtn.addEventListener("click", () => setCompareMode(!compareMode));
 
     productSelect.addEventListener("change", async (e) => {
-        const { usage } = getPreFilter();
-
-        if (usage === "fest") {
-            // product-select ist hier das Serien-Dropdown. Bei einer echten
-            // Mehrmodell-Serie passiert die eigentliche Produktwahl (mit
-            // Pixelpitch) erst im Modell-Dropdown, deshalb bleibt
-            // selectedProduct dann bis dahin leer. Hat die Serie dagegen nur
-            // ein Modell (z.B. LIAM, AURA), liefert loadProductModels dieses
-            // direkt zurueck und es wird ohne weiteren Auswahlschritt
-            // uebernommen.
-            const seriesId = e.target.value;
-            selectedProduct = null;
-            await loadMechanicsOptions(null);
-            const autoModel = await loadProductModels(seriesId || null);
-            if (autoModel) {
-                selectedProduct = autoModel;
-                await loadMechanicsOptions(selectedProduct.product_id);
-            }
-            update();
-            return;
-        }
-
-        const productId = e.target.value;
-        selectedProduct = productId ? products.find(p => p.product_id == productId) : null;
-        await loadMechanicsOptions(productId || null);
+        await applyProductChoice(e.target.value || null, null);
         update();
     });
 
@@ -6415,7 +6600,19 @@
         update();
     });
 
-    mountingTypeSelect.addEventListener("change", () => {
+    // Montageart: merkt sich immer das Label (auch wenn ein konkretes System
+    // gewaehlt wurde), damit es einen Produktwechsel ueberlebt. Ist noch kein
+    // Produkt gewaehlt, wirkt die Auswahl als Filter und laedt die
+    // Produktliste neu.
+    mountingTypeSelect.addEventListener("change", async () => {
+        const option = mountingTypeSelect.selectedOptions[0];
+        selectedLabel = option && option.value
+            ? (option.dataset.isLabel === "1" ? option.value : systemLabel(option.value))
+            : null;
+        if (!selectedProduct) {
+            await loadProducts();
+            return;
+        }
         updateCurvingVisibility();
         updatePersonContactVisibility();
         update();
@@ -6439,8 +6636,21 @@
     });
     curvingAngleSelect.addEventListener("change", update);
 
+    // Einsatzort/Einsatzart aendern zuerst die verfuegbaren Filter-Werte
+    // (Modi + Pixelpitch-Grenzen) und danach die gefilterte Produktliste.
+    // Eine bereits getroffene Produkt-/Montageart-Wahl bleibt erhalten,
+    // solange sie zum neuen Stand passt (siehe loadProducts) - deshalb ist
+    // die Eingabereihenfolge frei.
     [...locationRadios, ...usageRadios].forEach(radio => {
-        radio.addEventListener("change", loadProducts);
+        radio.addEventListener("change", async () => {
+            await loadProductFilters();
+            await loadProducts();
+        });
+    });
+
+    // Pixelpitch von/bis laedt die Produktliste neu.
+    [pixelpitchMinInput, pixelpitchMaxInput].forEach(input => {
+        input.addEventListener("change", loadProducts);
     });
 
     // Dropdown-Kaskade Brand -> Model -> Receiving Card -> Bit Depth ->
@@ -6848,7 +7058,12 @@
 
     exportPdfBtn.addEventListener("click", exportPdf);
 
-    loadProducts();
+    // Filteroptionen muessen vor der ersten Produktliste stehen, weil das
+    // Montageart-Dropdown daraus befuellt wird (availableSystems).
+    (async () => {
+        await loadProductFilters();
+        await loadProducts();
+    })();
     Visualizer.clear();
     ControllerModule.populateModels();
     ControllerModule.render(null, 0, 0);

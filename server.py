@@ -91,10 +91,20 @@ def get_products():
     elif usage == "temporaer":
         query += " AND ac.is_temporary_capable = 1"
 
+    # Pixelpitch von-bis (siehe _pixelpitch_sql) - reine Datenblatt-Grenze.
+    pitch_clause, params = _pixelpitch_sql(request.args)
+    query += pitch_clause
+
     query += " ORDER BY cp.name"
 
     conn = get_db_connection()
-    rows = conn.execute(query).fetchall()
+    rows = conn.execute(query, params).fetchall()
+    # Montageart als Filter: es bleiben nur Produkte uebrig, die eines der
+    # gewaehlten Systeme am gewaehlten Einsatzort ueberhaupt anbieten.
+    mounting_systems = _mounting_systems_arg(request.args)
+    if mounting_systems:
+        allowed = _products_matching_systems(conn, mounting_systems, location)
+        rows = [row for row in rows if row["product_id"] in allowed]
     conn.close()
 
     products = [dict(row) for row in rows]
@@ -134,10 +144,17 @@ def get_product_series():
     elif usage == "temporaer":
         query += " AND ac.is_temporary_capable = 1"
 
+    pitch_clause, params = _pixelpitch_sql(request.args)
+    query += pitch_clause
+
     query += " ORDER BY cp.name"
 
     conn = get_db_connection()
-    rows = conn.execute(query).fetchall()
+    rows = conn.execute(query, params).fetchall()
+    mounting_systems = _mounting_systems_arg(request.args)
+    if mounting_systems:
+        allowed = _products_matching_systems(conn, mounting_systems, location)
+        rows = [row for row in rows if row["product_id"] in allowed]
     conn.close()
 
     return jsonify([dict(row) for row in rows])
@@ -197,6 +214,12 @@ def get_product_models():
         query += " AND ac.is_fixed_capable = 1"
     elif usage == "temporaer":
         query += " AND ac.is_temporary_capable = 1"
+
+    # Auch innerhalb einer Serie greift der Pixelpitch-Filter, damit im
+    # Modell-Dropdown nur die uebrigen Modelle stehen.
+    pitch_clause, pitch_params = _pixelpitch_sql(request.args)
+    query += pitch_clause
+    params += pitch_params
 
     query += " ORDER BY ac.pixelpitch_mm"
 
@@ -1807,27 +1830,17 @@ def calculate_mechanics(product_id, width_cabinets, height_cabinets, system_name
         conn.close()
 
 
-@app.route("/api/mechanics-options")
-def api_mechanics_options():
-    # Liefert pro Produkt, welche der drei festen UI-Modi (Stacking/Hanging/
-    # Wall-Adapter) ueberhaupt sichtbar sein sollen, und welche Systeme sich
-    # jeweils dahinter verbergen. Ein Modus taucht nur auf, wenn das Produkt
-    # mindestens ein System in diesem Modus unterstuetzt (product_mechanics)
-    # - z.B. hat Vanish V8T nur "Stacking" (exklusiv Vanish-Stacking, kein
-    # NoBase/Wandadapter), waehrend die Aura-Familie "Stacking" mit zwei
-    # Systemen (Standard-Stacking/NoBase) sowie "Hanging" und "Wall-Adapter"
-    # anbietet. Das Frontend rendert Modus-Buttons nur fuer die
-    # zurueckgelieferten Eintraege und eine Sub-Auswahl nur, wenn ein Modus
-    # mehr als ein System enthaelt.
-    product_id = request.args.get("product_id", type=int)
-    if product_id is None:
-        return jsonify({"error": "product_id ist erforderlich"}), 400
-    # Einsatzort steuert zusaetzlich, welche Systeme ueberhaupt angeboten
-    # werden (siehe SYSTEM_LOCATION_ONLY) - Outdoor bekommt die AR-Familie
-    # den ER-Baukasten statt des Indoor-Systems.
-    location = request.args.get("location")
+# Ermittelt die tatsaechlich waehlbaren UI-Modi (Stacking/Hanging/
+# Wall-Adapter) samt der dahinterliegenden Systeme fuer ein Produkt an einem
+# Einsatzort. Frueher steckte diese Logik direkt in /api/mechanics-options -
+# sie wird jetzt zusaetzlich vom Montageart-Vorfilter der Produktliste
+# gebraucht (siehe _products_matching_mode), damit Vorfilter und spaetere
+# Montageart-Auswahl garantiert dieselben Regeln (SYSTEM_LOCATION_ONLY,
+# SYSTEM_REPLACED_BY, OUTDOOR_BLOCKED_SYSTEMS_BY_PRODUCT) benutzen.
+MOUNTING_MODE_ORDER = ["Stacking", "Hanging", "Wall-Adapter"]
 
-    conn = get_db_connection()
+
+def _available_modes(conn, product_id, location):
     rows = conn.execute(
         """
         SELECT ms.ui_mode AS mode, ms.name AS system_name
@@ -1838,7 +1851,6 @@ def api_mechanics_options():
         """,
         (product_id,),
     ).fetchall()
-    conn.close()
 
     systems_by_mode = {}
     for row in rows:
@@ -1863,12 +1875,174 @@ def api_mechanics_options():
             systems_by_mode[mode] = [name for name in systems if name not in replaced]
         systems_by_mode = {mode: systems for mode, systems in systems_by_mode.items() if systems}
 
-    mode_order = ["Stacking", "Hanging", "Wall-Adapter"]
-    modes = [
+    return [
         {"mode": mode, "systems": systems_by_mode[mode]}
-        for mode in mode_order
+        for mode in MOUNTING_MODE_ORDER
         if mode in systems_by_mode
     ]
+
+
+def _available_systems(conn, product_id, location):
+    # Flache Liste der waehlbaren Systemnamen (in Dropdown-Reihenfolge).
+    return [
+        system
+        for entry in _available_modes(conn, product_id, location)
+        for system in entry["systems"]
+    ]
+
+
+def _products_matching_systems(conn, system_names, location):
+    # Alle Produkt-IDs, die mindestens eines der gewuenschten Systeme am
+    # gewaehlten Einsatzort anbieten. Gefiltert wird ueber Systemnamen (nicht
+    # ueber den UI-Modus), weil im Dropdown auch Montagearten stehen, die nur
+    # ein System innerhalb eines Modus sind - "No-Base" ist z.B. ein eigener
+    # Eintrag im Stacking-Modus und muss sich einzeln filtern lassen.
+    # Bewusst in Python statt als SQL-JOIN, weil die Sperr-/
+    # Verdraengungsregeln (SYSTEM_LOCATION_ONLY & Co.) nur hier leben und
+    # Filter und Montageart-Dropdown sonst auseinanderlaufen wuerden.
+    wanted = set(system_names)
+    ids = set()
+    for row in conn.execute("SELECT DISTINCT product_id FROM product_mechanics").fetchall():
+        product_id = row["product_id"]
+        if wanted & set(_available_systems(conn, product_id, location)):
+            ids.add(product_id)
+    return ids
+
+
+def _mounting_systems_arg(request_args):
+    # Kommagetrennte Systemnamen aus dem Frontend (alle Systeme hinter dem
+    # gewaehlten Montageart-Label, siehe SYSTEM_LABELS in index.html - die
+    # Label-Zuordnung bleibt bewusst allein im Frontend, das Backend filtert
+    # generisch ueber Systemnamen).
+    raw = request_args.get("mounting_systems") or ""
+    return [name for name in (part.strip() for part in raw.split(",")) if name]
+
+
+def _pixelpitch_sql(request_args):
+    # "Pixelpitch von - bis" (mm) als reiner SQL-Filter auf ac.pixelpitch_mm.
+    # Leere/fehlende Felder heissen "keine Grenze".
+    clause = ""
+    params = []
+    pp_min = request_args.get("pixelpitch_min", type=float)
+    pp_max = request_args.get("pixelpitch_max", type=float)
+    if pp_min is not None:
+        clause += " AND ac.pixelpitch_mm >= ?"
+        params.append(pp_min)
+    if pp_max is not None:
+        clause += " AND ac.pixelpitch_mm <= ?"
+        params.append(pp_max)
+    return clause, params
+
+
+# Liefert dem Frontend die Vorfilter-Auswahl, bevor ueberhaupt ein Produkt
+# gewaehlt wurde: welche Montagearten es fuer Einsatzort/Einsatzart
+# ueberhaupt gibt und in welchem Pixelpitch-Bereich sich die passenden
+# Produkte bewegen (Grenzen fuer die "von - bis"-Felder).
+@app.route("/api/product-filters")
+def api_product_filters():
+    location = request.args.get("location")
+    usage = request.args.get("usage")
+
+    location_usage_sql = ""
+    if location == "indoor":
+        location_usage_sql += " AND ac.is_indoor_capable = 1"
+    elif location == "outdoor":
+        location_usage_sql += " AND ac.is_outdoor_capable = 1"
+    if usage == "fest":
+        location_usage_sql += " AND ac.is_fixed_capable = 1"
+    elif usage == "temporaer":
+        location_usage_sql += " AND ac.is_temporary_capable = 1"
+
+    conn = get_db_connection()
+    try:
+        # Alle Produkte, die Einsatzort/Einsatzart erfuellen - einmal ueber die
+        # alte 1:1-Spalte (temporaerer Einsatz) und einmal ueber die
+        # Serien-Tabelle (Festinstallation), damit der Vorfilter in beiden
+        # Auswahlwegen dieselbe Menge betrachtet.
+        product_rows = conn.execute(
+            f"""
+            SELECT cp.id AS product_id
+            FROM configurator_product cp
+            JOIN article_catalog_mock ac ON cp.product_article_id = ac.id
+            WHERE 1=1 {location_usage_sql}
+            UNION
+            SELECT cp.id AS product_id
+            FROM configurator_product cp
+            JOIN configurator_product_article cpa ON cpa.configurator_product_id = cp.id
+            JOIN article_catalog_mock ac ON ac.id = cpa.article_catalog_mock_id
+            WHERE 1=1 {location_usage_sql}
+            """
+        ).fetchall()
+        product_ids = {row["product_id"] for row in product_rows}
+
+        # Alle Systeme, die in dieser Produktmenge ueberhaupt vorkommen - in
+        # Dropdown-Reihenfolge (Stacking, NoBase, Hanging, Wandadapter) und
+        # ohne Duplikate. Das Frontend gruppiert sie ueber SYSTEM_LABELS zu
+        # den sichtbaren Montageart-Eintraegen.
+        systems = []
+        for product_id in sorted(product_ids):
+            for name in _available_systems(conn, product_id, location):
+                if name not in systems:
+                    systems.append(name)
+        mode_rank = {
+            row["name"]: (MOUNTING_MODE_ORDER.index(row["ui_mode"])
+                          if row["ui_mode"] in MOUNTING_MODE_ORDER else len(MOUNTING_MODE_ORDER),
+                          row["id"])
+            for row in conn.execute("SELECT id, name, ui_mode FROM mechanical_systems").fetchall()
+        }
+        systems.sort(key=lambda name: mode_rank.get(name, (len(MOUNTING_MODE_ORDER), 0)))
+
+        pitch_row = conn.execute(
+            f"""
+            SELECT MIN(pitch) AS min_pitch, MAX(pitch) AS max_pitch FROM (
+                SELECT ac.pixelpitch_mm AS pitch
+                FROM configurator_product cp
+                JOIN article_catalog_mock ac ON cp.product_article_id = ac.id
+                WHERE ac.pixelpitch_mm IS NOT NULL {location_usage_sql}
+                UNION
+                SELECT ac.pixelpitch_mm AS pitch
+                FROM configurator_product cp
+                JOIN configurator_product_article cpa ON cpa.configurator_product_id = cp.id
+                JOIN article_catalog_mock ac ON ac.id = cpa.article_catalog_mock_id
+                WHERE ac.pixelpitch_mm IS NOT NULL {location_usage_sql}
+            )
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    return jsonify({
+        "mounting_systems": systems,
+        "pixelpitch_min": pitch_row["min_pitch"],
+        "pixelpitch_max": pitch_row["max_pitch"],
+    })
+
+
+@app.route("/api/mechanics-options")
+def api_mechanics_options():
+    # Liefert pro Produkt, welche der drei festen UI-Modi (Stacking/Hanging/
+    # Wall-Adapter) ueberhaupt sichtbar sein sollen, und welche Systeme sich
+    # jeweils dahinter verbergen. Ein Modus taucht nur auf, wenn das Produkt
+    # mindestens ein System in diesem Modus unterstuetzt (product_mechanics)
+    # - z.B. hat Vanish V8T nur "Stacking" (exklusiv Vanish-Stacking, kein
+    # NoBase/Wandadapter), waehrend die Aura-Familie "Stacking" mit zwei
+    # Systemen (Standard-Stacking/NoBase) sowie "Hanging" und "Wall-Adapter"
+    # anbietet. Das Frontend rendert Modus-Buttons nur fuer die
+    # zurueckgelieferten Eintraege und eine Sub-Auswahl nur, wenn ein Modus
+    # mehr als ein System enthaelt.
+    product_id = request.args.get("product_id", type=int)
+    if product_id is None:
+        return jsonify({"error": "product_id ist erforderlich"}), 400
+    # Einsatzort steuert zusaetzlich, welche Systeme ueberhaupt angeboten
+    # werden (siehe SYSTEM_LOCATION_ONLY) - Outdoor bekommt die AR-Familie
+    # den ER-Baukasten statt des Indoor-Systems.
+    location = request.args.get("location")
+
+    conn = get_db_connection()
+    try:
+        modes = _available_modes(conn, product_id, location)
+    finally:
+        conn.close()
     # Gradstufen fuers Curving-Dropdown (Frontend) - leeres Array bedeutet
     # "Produkt unterstuetzt kein Curving", das Dropdown bleibt dann
     # versteckt, unabhaengig vom gewaehlten System.
